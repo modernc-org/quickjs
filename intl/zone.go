@@ -7,6 +7,7 @@ package intl // import "modernc.org/quickjs/intl"
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,7 +44,8 @@ var utcAliases = map[string]bool{
 // timeZone resolves an IANA time zone name, a UTC alias or an offset time zone
 // identifier like "+05:30" to its canonical name and location. The error is
 // non-nil for anything else, including "Local": Go accepts it as a location
-// name but it is not a time zone identifier and browsers reject it.
+// name but it is not a time zone identifier and browsers reject it. A name is
+// matched regardless of case and reported as the database spells it.
 //
 // Resolving a name needs the zoneinfo database. Go finds it in the operating
 // system's copy or, when the program imports time/tzdata, in the one embedded
@@ -71,9 +73,6 @@ func resolveTimeZone(name string) (string, *time.Location, error) {
 		return "", nil, invalid
 	case utcAliases[strings.ToUpper(name)]:
 		return "UTC", time.UTC, nil
-	case strings.EqualFold(name, "local"):
-		// Go resolves it to the host zone, ECMA-402 has no such identifier.
-		return "", nil, invalid
 	case name[0] == '+' || name[0] == '-':
 		secs, err := parseOffset(name)
 		if err != nil {
@@ -88,20 +87,46 @@ func resolveTimeZone(name string) (string, *time.Location, error) {
 		return cname, time.FixedZone(cname, secs), nil
 	}
 
-	loc, err := time.LoadLocation(name)
-	if err == nil {
-		return name, loc, nil
-	}
-
-	// A last chance for a mis-cased name: browsers match IANA identifiers
-	// case-insensitively, Go's file lookup does not.
-	if cname := titleZoneName(name); cname != name {
-		if loc, err := time.LoadLocation(cname); err == nil {
-			return cname, loc, nil
+	// Browsers match IANA identifiers regardless of case and report them
+	// as the database spells them. Go's lookup is a file name, which does
+	// not find "us/eastern" on most systems and finds it as it is spelled
+	// on macOS.
+	cname, ok := zoneIDs()[strings.ToUpper(name)]
+	if !ok {
+		if !newZone(name) {
+			return "", nil, invalid
 		}
+
+		cname = name
 	}
 
-	return "", nil, invalid
+	loc, err := time.LoadLocation(cname)
+	if err != nil {
+		return "", nil, invalid
+	}
+
+	return cname, loc, nil
+}
+
+// zoneIDs maps the upper case of every name in zoneNames to the name.
+var zoneIDs = sync.OnceValue(func() map[string]string {
+	m := map[string]string{}
+	for name := range strings.SplitSeq(zoneNames, "\n") {
+		m[strings.ToUpper(name)] = name
+	}
+	return m
+})
+
+// newZone reports whether name, which is not in zoneNames, can be a zone the
+// database added since: one in a region where IANA adds zones. Such a name is
+// taken as it is spelled. Go's zoneinfo directory also has files that are no
+// time zone identifiers, which browsers reject: posixrules, localtime, the
+// posix and right trees.
+func newZone(name string) bool {
+	region, _, ok := strings.Cut(name, "/")
+	return ok && slices.Contains([]string{
+		"Africa", "America", "Antarctica", "Arctic", "Asia", "Atlantic", "Australia", "Europe", "Indian", "Pacific",
+	}, region)
 }
 
 // parseOffset returns the number of seconds represented by an offset time zone
@@ -171,22 +196,6 @@ func gmtOffset(secs int, short bool) string {
 	return fmt.Sprintf("GMT%s%02d:%02d", sign, h, m)
 }
 
-// titleZoneName upper cases the first letter of every word of every path
-// element of an IANA name, the shape almost all of them have.
-func titleZoneName(name string) string {
-	elems := strings.Split(name, "/")
-	for i, e := range elems {
-		words := strings.Split(strings.ToLower(e), "_")
-		for j, w := range words {
-			if w != "" {
-				words[j] = strings.ToUpper(w[:1]) + w[1:]
-			}
-		}
-		elems[i] = strings.Join(words, "_")
-	}
-	return strings.Join(elems, "/")
-}
-
 // localTimeZone returns the host's IANA time zone name.
 //
 // Go does not expose it: time.Local carries the zone data but its name is the
@@ -204,6 +213,9 @@ func localTimeZone() string {
 
 	if s, err := os.Readlink("/etc/localtime"); err == nil {
 		if _, after, ok := strings.Cut(s, "zoneinfo/"); ok {
+			// Some systems link into the posix tree, which has the same
+			// zones under the same names.
+			after = strings.TrimPrefix(after, "posix/")
 			if name, _, err := timeZone(after); err == nil {
 				return name
 			}

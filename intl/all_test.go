@@ -469,6 +469,45 @@ func TestDefaultTimeZone(t *testing.T) {
 	})
 }
 
+// TestTimeZoneNames checks that a time zone identifier is matched regardless
+// of case and reported as the database spells it, and that files of the
+// zoneinfo directory that are no time zone identifiers are rejected. Names
+// were looked up as files: "etc/gmt+5" was a RangeError on most systems, on
+// macOS "america/new_york" was reported as given, and posixrules was a zone.
+func TestTimeZoneNames(t *testing.T) {
+	vm := newVM(t)
+	var tests [][2]string
+	for _, name := range []string{
+		"America/New_York", "Etc/GMT+5", "US/Eastern", "EST5EDT", "Europe/Isle_of_Man",
+		"America/Port-au-Prince", "Antarctica/DumontDUrville", "Africa/Dar_es_Salaam",
+	} {
+		for _, s := range []string{name, strings.ToLower(name), strings.ToUpper(name)} {
+			tests = append(tests, [2]string{fmt.Sprintf(`new Intl.DateTimeFormat('en-US', {timeZone: %q}).resolvedOptions().timeZone`, s), name})
+		}
+	}
+	for _, name := range []string{"Factory", "posixrules", "localtime", "posix/Europe/Prague", "right/UTC", "Local", "zone.tab", "Europe/../Europe/Prague"} {
+		tests = append(tests, [2]string{
+			fmt.Sprintf(`(() => {try {new Intl.DateTimeFormat('en-US', {timeZone: %q}); return 'no error'} catch (e) {return e.constructor.name}})()`, name),
+			"RangeError",
+		})
+	}
+	evalTests(t, vm, tests)
+
+	// A name the list does not have yet is taken as it is spelled, from the
+	// regions IANA adds zones to.
+	for name, want := range map[string]bool{
+		"America/Somewhere_New": true, "Antarctica/Somewhere_New": true,
+		"posixrules": false, "posix/Europe/Prague": false, "right/UTC": false, "Etc/Somewhere": false, "Factory": false,
+	} {
+		if got := newZone(name); got != want {
+			t.Errorf("newZone(%q) = %v, want %v", name, got, want)
+		}
+	}
+	if _, ok := zoneIDs()["FACTORY"]; ok {
+		t.Errorf("zoneNames has Factory")
+	}
+}
+
 func TestLocalTimeZone(t *testing.T) {
 	tz := localTimeZone()
 	if _, _, err := timeZone(tz); err != nil {
