@@ -164,6 +164,39 @@ func TestStyleHourCycle(t *testing.T) {
 	})
 }
 
+// TestDayPeriod checks the dayPeriod option at and around noon. Noon names
+// 12:00, and the whole noon hour only where no minute or second is shown: the
+// noon hour was "noon" through 12:59. Narrow noon is "n". The 24 hour clock
+// shows no day period, as it shows no AM or PM.
+func TestDayPeriod(t *testing.T) {
+	vm := newVM(t)
+	at := func(h, m, s int) string { return fmt.Sprintf("new Date(Date.UTC(2025, 0, 1, %d, %d, %d))", h, m, s) }
+	format := func(opts string, h, m, s int) string {
+		return fmt.Sprintf("new Intl.DateTimeFormat('en-US', {%s}).format(%s)", opts, at(h, m, s))
+	}
+	evalTests(t, vm, [][2]string{
+		{format(`hour: 'numeric', minute: 'numeric', dayPeriod: 'short'`, 12, 0, 0), "12:00 noon"},
+		{format(`hour: 'numeric', minute: 'numeric', dayPeriod: 'short'`, 12, 30, 0), "12:30 in the afternoon"},
+		{format(`hour: 'numeric', minute: 'numeric', dayPeriod: 'long'`, 12, 30, 0), "12:30 in the afternoon"},
+		{format(`hour: 'numeric', minute: 'numeric', dayPeriod: 'short'`, 12, 0, 30), "12:00 noon"},
+		{format(`hour: 'numeric', minute: 'numeric', second: 'numeric', dayPeriod: 'short'`, 12, 0, 30), "12:00:30 in the afternoon"},
+		{format(`hour: 'numeric', minute: 'numeric', second: 'numeric', dayPeriod: 'short'`, 12, 0, 0), "12:00:00 noon"},
+		{format(`hour: 'numeric', dayPeriod: 'short'`, 12, 30, 0), "12 noon"},
+		{format(`dayPeriod: 'short'`, 12, 30, 0), "noon"},
+		{format(`hour: 'numeric', minute: 'numeric', dayPeriod: 'narrow'`, 12, 0, 0), "12:00 n"},
+		{format(`hour: 'numeric', minute: 'numeric', dayPeriod: 'narrow'`, 12, 30, 0), "12:30 in the afternoon"},
+		{format(`dayPeriod: 'narrow'`, 12, 30, 0), "n"},
+		{format(`hour: 'numeric', dayPeriod: 'narrow'`, 9, 0, 0), "9 in the morning"},
+		{format(`hour: 'numeric', minute: 'numeric', dayPeriod: 'short'`, 0, 0, 0), "12:00 at night"},
+		{format(`hour: 'numeric', minute: 'numeric', dayPeriod: 'short', hourCycle: 'h23'`, 12, 0, 0), "12:00"},
+		{format(`hour: 'numeric', dayPeriod: 'short', hour12: false`, 15, 30, 0), "15"},
+		{format(`hour: 'numeric', dayPeriod: 'short', hourCycle: 'h24'`, 0, 30, 0), "24"},
+		{format(`hour: 'numeric', dayPeriod: 'short', hourCycle: 'h11'`, 12, 0, 0), "0 noon"},
+		{`new Intl.DateTimeFormat('en-US', {hour: 'numeric', dayPeriod: 'short', hourCycle: 'h23'}).resolvedOptions().dayPeriod`, "undefined"},
+		{`new Intl.DateTimeFormat('en-US', {dayPeriod: 'short', hourCycle: 'h23'}).resolvedOptions().dayPeriod`, "short"},
+	})
+}
+
 func TestDateTimeFormatToParts(t *testing.T) {
 	vm := newVM(t)
 	evalTests(t, vm, [][2]string{

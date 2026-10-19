@@ -148,7 +148,9 @@ func resolveDateTimeFormat(req request, defaultZone string) (*dateTimeFormat, er
 		if !h12 && f.Hour != "" {
 			// en-US writes the 24 hour clock with two digits, "00:00" where the
 			// 12 hour one has "12:00 AM", and resolves the option to match.
-			f.Hour = "2-digit"
+			// The day period goes with the 12 hour clock: it is dropped along
+			// with AM and PM.
+			f.Hour, f.DayPeriod = "2-digit", ""
 		}
 	}
 	return f, nil
@@ -350,7 +352,7 @@ func (f *dateTimeFormat) timeParts(c components, t time.Time) (r []part) {
 		r = appendFractionalSecond(r, c, t)
 		switch {
 		case c.dayPeriod != "":
-			r = append(r, lit(" "), part{"dayPeriod", dayPeriodName(t.Hour())})
+			r = append(r, lit(" "), part{"dayPeriod", dayPeriodName(c, t)})
 		case period != "":
 			r = append(r, lit(" "), part{"dayPeriod", period})
 		}
@@ -369,7 +371,7 @@ func (f *dateTimeFormat) timeParts(c components, t time.Time) (r []part) {
 			if len(r) != 0 {
 				r = append(r, lit(" "))
 			}
-			r = append(r, part{"dayPeriod", dayPeriodName(t.Hour())})
+			r = append(r, part{"dayPeriod", dayPeriodName(c, t)})
 		}
 	}
 	if c.timeZoneName != "" {

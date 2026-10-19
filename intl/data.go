@@ -6,6 +6,7 @@ package intl // import "modernc.org/quickjs/intl"
 
 import (
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -36,13 +37,19 @@ var (
 	}
 )
 
-// dayPeriodName returns the en day period covering hour, the strings CLDR uses
-// for the dayPeriod option. English has no distinct narrow or short forms worth
-// a table, so the width is ignored. Midnight is not among them: en puts 00:00
-// in the night, and only the noon hour gets a name of its own.
-func dayPeriodName(hour int) string {
+// dayPeriodName returns the en day period of t, the strings CLDR uses for the
+// dayPeriod option. Midnight is not among them: en puts 00:00 in the night.
+// Noon is a moment rather than a period: it names 12:00, and the whole noon
+// hour only when c shows no minute and no second that could tell 12:30 from
+// it. Only its narrow form, "n", differs from the other widths.
+func dayPeriodName(c components, t time.Time) string {
+	hour := t.Hour()
 	switch {
-	case hour == 12:
+	case hour == 12 && (c.minute == "" || t.Minute() == 0) && (c.second == "" || t.Second() == 0):
+		if c.dayPeriod == "narrow" {
+			return "n"
+		}
+
 		return "noon"
 	case hour < 6:
 		return "at night"

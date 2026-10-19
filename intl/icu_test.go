@@ -228,6 +228,8 @@ func icuCorpus() (r []string) {
 		`{dayPeriod:'short'}`, `{hour:'numeric',dayPeriod:'short'}`,
 		`{timeStyle:'medium',hourCycle:'h23'}`, `{timeStyle:'short',hourCycle:'h24'}`,
 		`{dateStyle:'short',timeStyle:'long',hourCycle:'h23'}`,
+		`{dayPeriod:'narrow'}`, `{hour:'numeric',minute:'numeric',dayPeriod:'short'}`,
+		`{hour:'numeric',minute:'numeric',dayPeriod:'narrow'}`, `{hour:'numeric',dayPeriod:'long',hourCycle:'h23'}`,
 	}
 	instants := []string{
 		"0",
@@ -256,6 +258,16 @@ func icuCorpus() (r []string) {
 				fmt.Sprintf(`JSON.stringify(new Intl.DateTimeFormat('en-US',%s).formatToParts(new Date(%s)))`, o, at),
 				fmt.Sprintf(`JSON.stringify(new Intl.DateTimeFormat('en-US',%s).resolvedOptions())`, o),
 			)
+		}
+	}
+	// Around noon, which en names as a moment of its own.
+	for _, opts := range []string{
+		`dayPeriod:'short'`, `dayPeriod:'narrow'`, `hour:'numeric',dayPeriod:'short'`,
+		`hour:'numeric',minute:'numeric',dayPeriod:'short'`, `hour:'numeric',minute:'numeric',dayPeriod:'narrow'`,
+		`hour:'numeric',minute:'numeric',second:'numeric',dayPeriod:'long'`,
+	} {
+		for _, at := range []string{"12,0,0", "12,0,30", "12,30,0", "11,59,59"} {
+			r = append(r, fmt.Sprintf(`new Intl.DateTimeFormat('en-US',{%s,timeZone:'UTC'}).format(Date.UTC(2025,7,16,%s))`, opts, at))
 		}
 	}
 	for _, opts := range dateOptions {
