@@ -148,28 +148,25 @@ func (f *numberFormat) digitOptions(o map[string]any, currencyDigits int) error 
 		f.MinimumIntegerDigits = mnid
 	}
 
-	mnfd, hasMnfd, err := optInt(o, "minimumFractionDigits", 0, 100)
-	if err != nil {
-		return err
-	}
-
-	mxfd, hasMxfd, err := optInt(o, "maximumFractionDigits", 0, 100)
-	if err != nil {
-		return err
-	}
-
-	mnsd, hasMnsd, err := optInt(o, "minimumSignificantDigits", 1, 21)
-	if err != nil {
-		return err
-	}
-
-	mxsd, hasMxsd, err := optInt(o, "maximumSignificantDigits", 1, 21)
-	if err != nil {
-		return err
-	}
-
+	// The options of the kind of digits not used are not read, so they are
+	// not checked either: next to significant digits, maximumFractionDigits
+	// can be 200, as it can be for a compact formatter given neither kind.
+	_, hasMnsd := o["minimumSignificantDigits"]
+	_, hasMxsd := o["maximumSignificantDigits"]
+	_, hasMnfd := o["minimumFractionDigits"]
+	_, hasMxfd := o["maximumFractionDigits"]
 	switch {
 	case hasMnsd || hasMxsd:
+		mnsd, _, err := optInt(o, "minimumSignificantDigits", 1, 21)
+		if err != nil {
+			return err
+		}
+
+		mxsd, _, err := optInt(o, "maximumSignificantDigits", 1, 21)
+		if err != nil {
+			return err
+		}
+
 		if !hasMnsd {
 			mnsd = 1
 		}
@@ -182,6 +179,16 @@ func (f *numberFormat) digitOptions(o map[string]any, currencyDigits int) error 
 
 		f.MinimumSignificantDigits, f.MaximumSignificantDigits = &mnsd, &mxsd
 	case hasMnfd || hasMxfd || f.Notation != "compact":
+		mnfd, _, err := optInt(o, "minimumFractionDigits", 0, 100)
+		if err != nil {
+			return err
+		}
+
+		mxfd, _, err := optInt(o, "maximumFractionDigits", 0, 100)
+		if err != nil {
+			return err
+		}
+
 		mnfdDefault, mxfdDefault := 0, 3
 		switch f.Style {
 		case "currency":
@@ -189,16 +196,16 @@ func (f *numberFormat) digitOptions(o map[string]any, currencyDigits int) error 
 		case "percent":
 			mxfdDefault = 0
 		}
-		if !hasMnfd {
-			mnfd = mnfdDefault
-		}
-		if !hasMxfd {
-			mxfd = mxfdDefault
-			if mxfd < mnfd {
-				mxfd = mnfd
-			}
-		}
-		if mnfd > mxfd {
+		// A default gives way to the bound that was given: a currency with
+		// two digits and maximumFractionDigits 0 formats 428.5 as $429.
+		switch {
+		case !hasMnfd && !hasMxfd:
+			mnfd, mxfd = mnfdDefault, mxfdDefault
+		case !hasMnfd:
+			mnfd = min(mnfdDefault, mxfd)
+		case !hasMxfd:
+			mxfd = max(mxfdDefault, mnfd)
+		case mnfd > mxfd:
 			return rangeError("minimumFractionDigits is greater than maximumFractionDigits")
 		}
 

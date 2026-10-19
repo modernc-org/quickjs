@@ -234,6 +234,38 @@ func TestNumberFormat(t *testing.T) {
 	})
 }
 
+// TestDigitOptions checks the digit options against what node answers. A
+// maximumFractionDigits below the style's default minimum, as for a currency
+// with two digits, threw a RangeError instead of lowering the minimum. And the
+// fraction digit options were checked next to significant digits, where they
+// are not read at all.
+func TestDigitOptions(t *testing.T) {
+	vm := newVM(t)
+	evalTests(t, vm, [][2]string{
+		{`new Intl.NumberFormat('en-US', {style: 'currency', currency: 'USD', maximumFractionDigits: 0}).format(428.5)`, "$429"},
+		{`new Intl.NumberFormat('en-US', {style: 'currency', currency: 'USD', maximumFractionDigits: 1}).format(1.25)`, "$1.3"},
+		{`new Intl.NumberFormat('en-US', {style: 'currency', currency: 'USD', maximumFractionDigits: 1}).resolvedOptions().minimumFractionDigits`, "1"},
+		{`(1234.56).toLocaleString('en-US', {style: 'currency', currency: 'USD', maximumFractionDigits: 0})`, "$1,235"},
+		{`new Intl.NumberFormat('en-US', {style: 'currency', currency: 'USD', minimumFractionDigits: 0}).format(5)`, "$5"},
+		{`new Intl.NumberFormat('en-US', {style: 'percent', minimumFractionDigits: 2}).format(0.1234)`, "12.34%"},
+		{`new Intl.NumberFormat('en-US', {maximumSignificantDigits: 3, maximumFractionDigits: 200}).format(1.2345)`, "1.23"},
+		{`new Intl.NumberFormat('en-US', {maximumSignificantDigits: 3, maximumFractionDigits: 200}).resolvedOptions().maximumFractionDigits`, "undefined"},
+		{`new Intl.NumberFormat('en-US', {minimumSignificantDigits: 2, minimumFractionDigits: -1}).format(1234)`, "1,234"},
+		{`new Intl.NumberFormat('en-US', {notation: 'compact', minimumSignificantDigits: 2, minimumFractionDigits: -1}).format(1234)`, "1.234K"},
+		{`new Intl.NumberFormat('en-US', {maximumSignificantDigits: 3, minimumFractionDigits: 5, maximumFractionDigits: 1}).format(1.2345)`, "1.23"},
+	})
+
+	catch := func(src string) string {
+		return fmt.Sprintf("(() => {try {%s; return 'no error'} catch (e) {return e.constructor.name}})()", src)
+	}
+	evalTests(t, vm, [][2]string{
+		{catch(`new Intl.NumberFormat('en-US', {style: 'currency', currency: 'USD', minimumFractionDigits: 3, maximumFractionDigits: 1})`), "RangeError"},
+		{catch(`new Intl.NumberFormat('en-US', {maximumFractionDigits: 200})`), "RangeError"},
+		{catch(`new Intl.NumberFormat('en-US', {notation: 'compact', maximumFractionDigits: 200})`), "RangeError"},
+		{catch(`new Intl.NumberFormat('en-US', {minimumSignificantDigits: 3, maximumSignificantDigits: 2})`), "RangeError"},
+	})
+}
+
 // TestICURules pins the en-US rules this package was checked against a full
 // ICU (node's Intl) for. They are the ones no reading of the spec gives you:
 // which field widens to two digits next to which other one, where compact
