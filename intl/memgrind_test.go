@@ -45,6 +45,7 @@ func TestMemgrind2(t *testing.T) {
 			`d.resolvedOptions(); n.resolvedOptions()`,
 			`new Date(0).toLocaleString('en-US', {timeZone: 'Asia/Tokyo'})`,
 			`(1234.5).toLocaleString('en-US')`,
+			`(1234n).toLocaleString('en-US')`,
 			`Intl.getCanonicalLocales(['en-us', 'DE-de'])`,
 			`try { new Intl.DateTimeFormat('en', {timeZone: 'Mars/Olympus'}) } catch (e) { e.message }`,
 		} {

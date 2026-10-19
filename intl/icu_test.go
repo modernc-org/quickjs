@@ -275,6 +275,11 @@ func icuCorpus() (r []string) {
 			r = append(r, fmt.Sprintf(`new Date(1755300000000).%s('en-US',%s)`, m, opts))
 		}
 	}
+	for _, v := range []string{"0n", "-1n", "123456789n", "-123456789012345678901234567890n"} {
+		for _, opts := range []string{`{}`, `{style:'currency',currency:'EUR'}`, `{notation:'compact'}`, `{minimumFractionDigits:2}`} {
+			r = append(r, fmt.Sprintf(`(%s).toLocaleString('en-US',%s)`, v, opts))
+		}
+	}
 	// Time zone names in any case, and files of the zoneinfo directory that
 	// are no time zones. Links are left out: node's ICU resolves them, see
 	// the package documentation.

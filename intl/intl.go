@@ -17,8 +17,9 @@
 //
 // Register also replaces Date.prototype.toLocaleString, toLocaleDateString and
 // toLocaleTimeString along with Number.prototype.toLocaleString, which ECMA-402
-// redefines in terms of those two constructors. QuickJS ships fallbacks for
-// them that ignore their arguments, so
+// redefines in terms of those two constructors, and adds
+// BigInt.prototype.toLocaleString, which QuickJS does not have. QuickJS ships
+// fallbacks for the others that ignore their arguments, so
 //
 //	new Date(0).toLocaleString("en-US", {timeZone: "America/New_York"})
 //

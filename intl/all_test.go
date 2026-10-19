@@ -321,6 +321,25 @@ func TestDigitOptions(t *testing.T) {
 	})
 }
 
+// TestBigIntToLocaleString formats a BigInt with toLocaleString, which ECMA-402
+// defines in terms of Intl.NumberFormat. QuickJS has no
+// BigInt.prototype.toLocaleString, so a BigInt used Object.prototype's and
+// came out as toString writes it, without grouping and ignoring the options.
+func TestBigIntToLocaleString(t *testing.T) {
+	vm := newVM(t)
+	evalTests(t, vm, [][2]string{
+		{`(123456789n).toLocaleString('en-US')`, "123,456,789"},
+		{`(123456789n).toLocaleString()`, "123,456,789"},
+		{`(-123456789012345678901234567890n).toLocaleString('en-US')`, "-123,456,789,012,345,678,901,234,567,890"},
+		{`(123456789n).toLocaleString('en-US', {style: 'currency', currency: 'USD'})`, "$123,456,789.00"},
+		{`(1234n).toLocaleString('en-US', {notation: 'compact'})`, "1.2K"},
+		{`(1n).toLocaleString('en-US', {minimumFractionDigits: 2})`, "1.00"},
+		{`Object(5n).toLocaleString('en-US')`, "5"},
+		{`Object.getOwnPropertyDescriptor(BigInt.prototype, 'toLocaleString').enumerable`, "false"},
+		{`(() => {try {return BigInt.prototype.toLocaleString.call(1)} catch (e) {return e.constructor.name}})()`, "TypeError"},
+	})
+}
+
 // TestCompactCarry rounds compact notation up into the next power of a
 // thousand. That moved to the next suffix only without digit options and from
 // a thousand up: 999999 with maximumFractionDigits 1 was "1000K" and 999.9

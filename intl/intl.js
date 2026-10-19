@@ -375,6 +375,17 @@
 			return new NumberFormat(locales, opts);
 		}).format(v);
 	});
+
+	// QuickJS has no BigInt.prototype.toLocaleString of its own: a BigInt
+	// found Object.prototype's, which writes it as toString does.
+	const bigintValueOf = BigInt.prototype.valueOf;
+
+	defineMethod(BigInt.prototype, 'toLocaleString', function (locales, opts) {
+		const v = bigintValueOf.call(this);
+		return cached(cacheKey('number', locales, opts), function () {
+			return new NumberFormat(locales, opts);
+		}).format(v);
+	});
 })(
 	globalThis.__quickjs_intl_dtfResolve__,
 	globalThis.__quickjs_intl_dtfFormat__,
