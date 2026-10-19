@@ -460,6 +460,10 @@ type state struct {
 
 	// depth counts the calls into Javascript in progress, see enter.
 	depth int
+	// panicked holds what a Go function called from Javascript panicked
+	// with, until the panic goes on in the Go code that called Javascript.
+	// See hostPanic.
+	panicked any
 }
 
 // NewVM returns a newly created VM.
@@ -517,9 +521,11 @@ func (m *VM) enter() {
 	m.depth++
 }
 
-// leave ends a call into Javascript started by enter.
+// leave ends a call into Javascript started by enter. If a Go function called
+// by that Javascript panicked, the panic goes on from here.
 func (m *VM) leave() {
 	m.depth--
+	m.repanic()
 }
 
 func (m *VM) configureInterrupt() {
@@ -677,6 +683,14 @@ func (m *VM) ExecutePendingJobs() (n int, err error) {
 		}
 
 		n++
+		if m.panicked != nil {
+			// A Go function the job called panicked. The jobs left are
+			// page code that must not run now, and the panic goes on in
+			// leave, also when a promise took the exception thrown in its
+			// place.
+			return n, err
+		}
+
 		if r < 0 {
 			if e := m.errFromException(); e != nil && err == nil {
 				err = e // report the first failure, keep draining the rest
@@ -1503,7 +1517,26 @@ func (m *VM) errFromException() error {
 
 	defer lib.XFreeValue(tls, ctx, e)
 
+	// The exception hostPanic threw in place of a panic is not an error: the
+	// panic goes on.
+	m.repanic()
 	return ErrorFromValue(Value{vm: m, v: e})
+}
+
+// hostPanic keeps 'p', what Go code that Javascript called panicked with, and
+// throws an uncatchable InternalError in its place, as the engine does for an
+// interrupt: no catch or finally block of the script runs for it. 'what' names
+// the Go code in the message. A panic must not unwind through the engine. It
+// left the engine pointing at stack frames that were gone, the next error the
+// engine made walked them, and the VM no longer stopped at its eval timeout,
+// or crashed the process. The panic goes on with the same value in the Go code
+// that called Javascript, see leave and errFromException. That can be a Go
+// function one level up, which then panics the same way.
+func (m *VM) hostPanic(tls *libc.TLS, ctx uintptr, what string, p any) lib.TJSValue {
+	if m.panicked == nil {
+		m.panicked = p
+	}
+	return throwUncatchable(tls, ctx, fmt.Sprintf("panic in %s: %v", what, p))
 }
 
 // hostDone is called when Go code that Javascript called returns. If 'm' is
@@ -1522,12 +1555,48 @@ func (m *VM) hostDone(tls *libc.TLS, ctx uintptr) (r lib.TJSValue, interrupted b
 	return throwUncatchable(tls, ctx, "interrupted"), true
 }
 
+// hostCall runs 'f', Go code that Javascript called and that has no other
+// recovery, and reports whether it failed, by a panic or an interrupt. The
+// exception is then pending. See hostPanic and hostDone.
+func (m *VM) hostCall(tls *libc.TLS, ctx uintptr, what string, f func()) (failed bool) {
+	defer func() {
+		if p := recover(); p != nil {
+			m.hostPanic(tls, ctx, what, p)
+			failed = true
+		}
+	}()
+
+	f()
+	_, failed = m.hostDone(tls, ctx)
+	return failed
+}
+
 // throwUncatchable throws an InternalError with 'msg' that no catch or
 // finally block of a script runs for, as the engine does for an interrupt.
 func throwUncatchable(tls *libc.TLS, ctx uintptr, msg string) lib.TJSValue {
 	r := throwInternalError(tls, ctx, msg)
 	lib.XJS_SetUncatchableException(tls, ctx, 1)
 	return r
+}
+
+// repanic goes on with the panic hostPanic kept, if any. It first drops the
+// exception thrown in place of the panic, when it is still pending, and clears
+// the uncatchable flag, so that the VM can be used again once the panic is
+// recovered.
+func (m *VM) repanic() {
+	p := m.panicked
+	if p == nil {
+		return
+	}
+
+	m.panicked = nil
+	tls := m.runtime.tls
+	ctx := m.cContext
+	if lib.XJS_HasException(tls, ctx) != 0 {
+		dropException(tls, ctx)
+	}
+	lib.XJS_SetUncatchableException(tls, ctx, 0)
+	panic(p)
 }
 
 // StdAddHelpers adds the 'print' and 'console' global objects to 'm'.
@@ -1846,6 +1915,11 @@ func callGo(tls *libc.TLS, ctx uintptr, this lib.TJSValue, argc int32, argv uint
 
 	m := info.vm
 	defer func() {
+		if p := recover(); p != nil {
+			r = m.hostPanic(tls, ctx, "Go function "+info.name, p)
+			return
+		}
+
 		if e, ok := m.hostDone(tls, ctx); ok {
 			if !isException(r) {
 				lib.XFreeValue(tls, ctx, r)
@@ -2742,7 +2816,12 @@ func customModuleNormalize(tls *libc.TLS, ctx uintptr, module_base_name, module_
 		name = cGoString(tls, module_name)
 	}
 
-	normName, err := state.normalize(state.vm, baseName, name)
+	var normName string
+	var err error
+	if state.vm.hostCall(tls, ctx, "module normalizer", func() { normName, err = state.normalize(state.vm, baseName, name) }) {
+		return 0
+	}
+
 	if err != nil {
 		throwTypeError(tls, ctx, fmt.Sprintf("module normalization failed: %v", err))
 		return 0
@@ -2765,7 +2844,12 @@ func customModuleLoader(tls *libc.TLS, ctx uintptr, module_name uintptr, opaque 
 		name = cGoString(tls, module_name)
 	}
 
-	source, err := state.loader(state.vm, name)
+	var source string
+	var err error
+	if state.vm.hostCall(tls, ctx, "module loader", func() { source, err = state.loader(state.vm, name) }) {
+		return 0
+	}
+
 	if err != nil {
 		throwTypeError(tls, ctx, fmt.Sprintf("module load failed: %v", err))
 		return 0

@@ -122,6 +122,7 @@ func TestMemgrind2(t *testing.T) {
 	t.Run("goInvalidUTF8", TestGoInvalidUTF8)
 	t.Run("jsLoneSurrogate", TestJSLoneSurrogate)
 	t.Run("registerExisting", TestRegisterFuncExistingName)
+	t.Run("hostPanic", TestHostPanic)
 
 	if err := libc.MemAuditReport(); err != nil {
 		t.Fatal(err)

@@ -122,6 +122,12 @@ handed out by the `staticMagic` atomic counter. Custom module loaders live in `c
 Never use `JS_SetPropertyFunctionList` on an object that may already have the property: it `abort()`s
 the process.
 
+A Go panic must never unwind through the engine: it leaves `rt->current_stack_frame` pointing at dead
+frames, and the next error walks them (hang or crash). `callGo` recovers into `hostPanic`, which keeps
+the value in `m.panicked` and throws an uncatchable `InternalError` (as the engine does for an
+interrupt). Other Go code called from C goes through `hostCall` (module loader, normalizer).
+`leave()` and `errFromException()` re-panic with the original value in the Go code that called JS.
+
 ### Interrupt / eval timeout
 
 Each `VM` owns an `interruptData` struct (allocated in libc memory) holding `interrupt int32` and
@@ -133,8 +139,8 @@ function that JS called must neither extend the timeout nor swallow an `Interrup
 `interruptHandler` polls both fields. `SetEvalTimeout` sets the duration; `Interrupt()` reaches the
 flag through `m.intr` (Go memory, mutex) so it is safe from any goroutine, also during and after
 `Close`. When adding a new entry point that runs JS (also through a getter, setter, `toJSON` or
-`toString`), use `enter`/`leave`, or the timeout does not apply, and `hostDone` could read
-a stale deadline. `hostDone` runs when Go code called from JS returns: if the
+`toString`), use `enter`/`leave`, or neither the timeout nor the panic propagation applies, and
+`hostDone` could read a stale deadline. `hostDone` runs when Go code called from JS returns: if the
 VM is interrupted it throws the engine's uncatchable `InternalError: interrupted` in place of the
 result. The engine polls only every ~10000 steps, and the poll could land inside a nested `Eval` every
 time; a Go function that took that error for its own then kept the outer script running forever.
