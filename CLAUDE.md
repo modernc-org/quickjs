@@ -78,6 +78,11 @@ canonical way to validate `Dup`/`Free` pairing — see the `TestMemgrind` doc.
 - `runtime` (unexported): wraps `lib.TJSRuntime` plus its own `*libc.TLS`. One TLS per runtime.
 - `VM` (the main handle): wraps a `lib.TJSContext` (a JS realm). Created by `NewVM()`, released by
   `Close()`. **Not safe for concurrent use by multiple goroutines** — same for `runtime`.
+  `newRuntime` sets the stack limit to `lib.MaxStackSlots` explicitly: in libquickjs v0.13.1 and older
+  `JS_NewRuntime` sets 1 MB, which the port's slot-counting stack check reads as a million slots, and
+  infinite recursion then overflows the goroutine stack, a fatal error, before the engine throws. Newer
+  libquickjs starts with `MaxStackSlots` (5000, ~one slot per plain JS call, 3-9 per level through
+  built-ins); the call can go once `go.mod` requires such a version.
 - `Value`: wraps a reference-counted `lib.TJSValue`. `Dup()`/`Free()` must be **strictly paired and
   properly nested** (the type doc spells out how this breaks across goroutines/channels). Getting this
   wrong causes leaks or use-after-free, caught by the memgrind tests.

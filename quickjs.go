@@ -153,6 +153,14 @@ func newRuntime() (*runtime, error) {
 		return nil, fmt.Errorf("failed to create a new Javascript runtime")
 	}
 
+	// In libquickjs v0.13.1 and older, JS_NewRuntime sets the stack size to
+	// 1 MB, meant as bytes, but the stack check of the Go port counts
+	// libc.TLS stack slots, roughly one per Javascript call frame. A million
+	// of them overflow the goroutine stack first, which kills the process,
+	// so recursing without end must hit the port's own limit instead and
+	// throw. Newer versions start with that limit, and this call can go once
+	// go.mod requires one.
+	lib.XJS_SetMaxStackSize(tls, r, lib.MaxStackSlots)
 	return &runtime{
 		cRuntime: r,
 		tls:      tls,
@@ -456,8 +464,10 @@ func (m *VM) SetGCThreshold(threshold uintptr) {
 
 // SetMaxStackSize limits the JS call depth, in libc.TLS stack slots (~one per JS
 // call frame in the CGo-free port). Deep recursion then throws a catchable
-// RangeError instead of overflowing the Go goroutine stack. 0 restores the
-// MaxStackSlots default.
+// "InternalError: stack overflow" instead of overflowing the Go goroutine
+// stack, which would kill the process. 0 restores the default, the
+// MaxStackSlots constant of modernc.org/libquickjs, which a new VM starts
+// with.
 func (m *VM) SetMaxStackSize(threshold uintptr) {
 	lib.XJS_SetMaxStackSize(m.runtime.tls, m.runtime.cRuntime, libc.Tsize_t(threshold))
 }
