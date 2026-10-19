@@ -142,6 +142,28 @@ func TestDateTimeFormat(t *testing.T) {
 	})
 }
 
+// TestStyleHourCycle formats dateStyle and timeStyle on a 24 hour clock, which
+// writes the hour with two digits as the component options do. The styles
+// wrote "6:05".
+func TestStyleHourCycle(t *testing.T) {
+	vm := newVM(t)
+	const at = `new Date(Date.UTC(2025, 7, 16, 6, 5, 9))`
+	evalTests(t, vm, [][2]string{
+		{`new Intl.DateTimeFormat('en-US', {timeStyle: 'short', hourCycle: 'h23'}).format(` + at + `)`, "06:05"},
+		{`new Intl.DateTimeFormat('en-US', {timeStyle: 'medium', hourCycle: 'h23'}).format(` + at + `)`, "06:05:09"},
+		{`new Intl.DateTimeFormat('en-US', {timeStyle: 'long', hourCycle: 'h23'}).format(` + at + `)`, "06:05:09 UTC"},
+		{`new Intl.DateTimeFormat('en-US', {timeStyle: 'short', hourCycle: 'h24'}).format(` + at + `)`, "06:05"},
+		{`new Intl.DateTimeFormat('en-US', {timeStyle: 'short', hourCycle: 'h24'}).format(new Date(0))`, "24:00"},
+		{`new Intl.DateTimeFormat('en-US', {timeStyle: 'short', hour12: false}).format(` + at + `)`, "06:05"},
+		{`new Intl.DateTimeFormat('en-US', {dateStyle: 'short', timeStyle: 'long', hourCycle: 'h23'}).format(` + at + `)`, "8/16/25, 06:05:09 UTC"},
+		{`new Intl.DateTimeFormat('en-US', {dateStyle: 'full', timeStyle: 'short', hourCycle: 'h23'}).format(` + at + `)`, "Saturday, August 16, 2025 at 06:05"},
+		{`new Intl.DateTimeFormat('en-US', {timeStyle: 'short', hourCycle: 'h23'}).formatToParts(` + at + `)[0].value`, "06"},
+		// The 12 hour clock keeps one digit.
+		{`new Intl.DateTimeFormat('en-US', {timeStyle: 'short', hourCycle: 'h11'}).format(new Date(0))`, "0:00 AM"},
+		{`new Intl.DateTimeFormat('en-US', {timeStyle: 'short', hourCycle: 'h12'}).format(` + at + `)`, "6:05 AM"},
+	})
+}
+
 func TestDateTimeFormatToParts(t *testing.T) {
 	vm := newVM(t)
 	evalTests(t, vm, [][2]string{

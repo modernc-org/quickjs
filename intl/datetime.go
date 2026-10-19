@@ -214,6 +214,10 @@ func (f *dateTimeFormat) components() (c components) {
 	case "short":
 		c.hour, c.minute = "numeric", "2-digit"
 	}
+	if f.TimeStyle != "" && (c.hourCycle == "h23" || c.hourCycle == "h24") {
+		// The 24 hour clock has two digits in the styles too: "06:05".
+		c.hour = "2-digit"
+	}
 	c.wide = c.month == "long" || f.DateStyle == "full" || f.DateStyle == "long"
 	c.hasDate = c.weekday != "" || c.era != "" || c.year != "" || c.month != "" || c.day != ""
 	c.hasTime = c.dayPeriod != "" || c.hour != "" || c.minute != "" || c.second != "" ||

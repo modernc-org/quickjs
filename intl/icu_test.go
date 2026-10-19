@@ -57,8 +57,9 @@ var icuDifferences = []struct {
 		},
 	},
 	{
-		// The formatted output agrees; only the reported cycle differs.
-		"hourCycle for hour12:false, which V8 reports as h24 while formatting h23",
+		// The corpus has no hour12:false at midnight, where the two clocks
+		// differ in the output too.
+		"hourCycle for hour12:false, which V8 makes h24 rather than h23",
 		func(got, want string) bool {
 			return strings.Contains(want, `"h24"`) && strings.Contains(got, `"h23"`)
 		},
@@ -225,6 +226,8 @@ func icuCorpus() (r []string) {
 		`{year:'numeric',month:'numeric',day:'numeric',hour:'numeric',minute:'numeric',second:'numeric'}`,
 		`{month:'long',day:'numeric',hour:'numeric'}`, `{month:'short',day:'numeric',hour:'numeric'}`,
 		`{dayPeriod:'short'}`, `{hour:'numeric',dayPeriod:'short'}`,
+		`{timeStyle:'medium',hourCycle:'h23'}`, `{timeStyle:'short',hourCycle:'h24'}`,
+		`{dateStyle:'short',timeStyle:'long',hourCycle:'h23'}`,
 	}
 	instants := []string{
 		"0",

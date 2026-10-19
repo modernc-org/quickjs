@@ -57,8 +57,9 @@
 //   - The space before AM or PM is an ordinary one. V8 writes U+202F there in
 //     formatToParts but an ordinary space in format, and one separator has to
 //     be picked for both.
-//   - hourCycle "h23" is reported for hour12: false. V8 reports "h24" while
-//     still formatting midnight as 00, which is the value ECMA-402 asks for.
+//   - hour12: false is the 24 hour clock that starts at 00:00, hourCycle
+//     "h23", which ECMA-402 asks for. The V8 in node 20 makes it "h24" and
+//     writes midnight as 24:00.
 //
 // # Time zones
 //
