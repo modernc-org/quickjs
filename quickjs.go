@@ -184,6 +184,7 @@ func (r *runtime) newVM() (*VM, error) {
 	c := lib.XJS_NewContext(tls, r.cRuntime)
 	if c == 0 {
 		libc.Xfree(tls, interruptData)
+		libc.Xfree(tls, argv)
 		return nil, fmt.Errorf("failed to create a new Javascript context")
 	}
 
@@ -774,7 +775,11 @@ func (m *VM) Compile(javascript string, flags int) ([]byte, error) {
 
 	p := lib.XJS_WriteObject(tls, ctx, plen, v, flags2)
 	if p == 0 {
-		return nil, fmt.Errorf("OOM")
+		if lib.XJS_HasException(tls, ctx) != 0 {
+			return nil, m.errFromException()
+		}
+
+		return nil, fmt.Errorf("cannot write the bytecode")
 	}
 
 	plen2 := int(*(*libc.Tsize_t)(unsafe.Pointer(plen)))
@@ -846,6 +851,12 @@ func (m *VM) Call(function string, args ...any) (r any, err error) {
 	m.configureInterrupt()
 
 	f := lib.XJS_Eval(tls, ctx, ps, libc.Tsize_t(len(function)), uintptr(unsafe.Pointer(&evalFN)), int32(EvalGlobal))
+	if isException(f) {
+		// Evaluating 'function' threw, for example a ReferenceError for a
+		// name that is not defined. That is the error, not that the result
+		// is not a function.
+		return nil, m.errFromException()
+	}
 
 	defer lib.XFreeValue(tls, ctx, f)
 
@@ -874,6 +885,9 @@ func (m *VM) CallValue(function string, args ...any) (r Value, err error) {
 	m.configureInterrupt()
 
 	f := lib.XJS_Eval(tls, ctx, ps, libc.Tsize_t(len(function)), uintptr(unsafe.Pointer(&evalFN)), int32(EvalGlobal))
+	if isException(f) {
+		return r, m.errFromException() // see Call
+	}
 
 	defer lib.XFreeValue(tls, ctx, f)
 
@@ -1086,9 +1100,11 @@ func (m *VM) call(f, this lib.TJSValue, args ...any) (r any, err error) {
 // from a short one. JS_ToCStringLen2 reports the length instead, and the bytes
 // are copied out before the buffer is released.
 //
-// Like JS_ToCString it returns "" when the conversion throws, leaving the
-// exception pending.
-func goString(tls *libc.TLS, ctx uintptr, v lib.TJSValue) string {
+// The conversion can throw: the UTF-8 copy, which a string with non-ASCII
+// characters or one built by concatenation needs, can run out of memory, and a
+// value that is not a string has its toString called. 'ok' is then false and
+// the exception is left pending, see [VM.goString] and errString.
+func cString(tls *libc.TLS, ctx uintptr, v lib.TJSValue) (s string, ok bool) {
 	// The out-parameter lives on the emulated C stack, never the Go stack: the
 	// transpiled callee holds it as a uintptr, which a Go stack move would leave
 	// dangling.
@@ -1099,12 +1115,43 @@ func goString(tls *libc.TLS, ctx uintptr, v lib.TJSValue) string {
 
 	p := lib.XJS_ToCStringLen2(tls, ctx, plen, v, 0)
 	if p == 0 {
-		return ""
+		return "", false
 	}
 
 	defer lib.XJS_FreeCString(tls, ctx, p)
 
-	return string(unsafe.Slice((*byte)(unsafe.Pointer(p)), *(*libc.Tsize_t)(unsafe.Pointer(plen))))
+	return string(unsafe.Slice((*byte)(unsafe.Pointer(p)), *(*libc.Tsize_t)(unsafe.Pointer(plen)))), true
+}
+
+// goString is cString for a caller that returns the failure as its error: it
+// takes the exception out of the context, for example the engine's out of
+// memory error, and returns it.
+func (m *VM) goString(v lib.TJSValue) (string, error) {
+	s, ok := cString(m.runtime.tls, m.cContext, v)
+	if !ok {
+		return "", m.errFromException()
+	}
+
+	return s, nil
+}
+
+// errString is cString for ErrorFromValue, which has no error result and which
+// errFromException calls, so a failure cannot become an error without
+// recursing. errString drops the exception of a failed conversion and returns
+// "": the exception being read is the one to report, and one left pending
+// would be reported by the next unrelated call that finds it.
+func errString(tls *libc.TLS, ctx uintptr, v lib.TJSValue) string {
+	s, ok := cString(tls, ctx, v)
+	if !ok {
+		dropException(tls, ctx)
+	}
+
+	return s
+}
+
+// dropException frees the exception pending in 'ctx'.
+func dropException(tls *libc.TLS, ctx uintptr) {
+	lib.XFreeValue(tls, ctx, lib.XJS_GetException(tls, ctx))
 }
 
 func (m *VM) newObject(v lib.TJSValue) (r *Object, err error) {
@@ -1118,7 +1165,12 @@ func (m *VM) newObject(v lib.TJSValue) (r *Object, err error) {
 		return nil, m.errFromException()
 	}
 
-	return &Object{json: goString(tls, ctx, json)}, nil
+	s, err := m.goString(json)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Object{json: s}, nil
 }
 
 var (
@@ -1150,19 +1202,31 @@ func (m *VM) value(v lib.TJSValue, free bool) (r any, err error) {
 		lib.EJS_TAG_SHORT_BIG_INT: // 7,
 
 		ps := lib.XJS_GetPropertyStr(tls, ctx, v, toString)
-		if tag(ps) != lib.EJS_TAG_OBJECT {
-			return nil, fmt.Errorf("failed to get BigInt.toString()")
+		if isException(ps) {
+			return nil, m.errFromException()
 		}
 
 		defer lib.XFreeValue(tls, ctx, ps)
 
+		if tag(ps) != lib.EJS_TAG_OBJECT {
+			return nil, fmt.Errorf("failed to get BigInt.toString()")
+		}
+
 		*(*lib.TJSValue)(unsafe.Pointer(m.toStringArgv)) = m.int32_16
 		jsString := lib.XJS_Call(tls, ctx, ps, v, 1, m.toStringArgv)
+		if isException(jsString) {
+			return nil, m.errFromException()
+		}
 
 		defer lib.XFreeValue(tls, ctx, jsString)
 
+		s, err := m.goString(jsString)
+		if err != nil {
+			return nil, err
+		}
+
 		n := big.NewInt(0)
-		if _, ok := n.SetString(goString(tls, ctx, jsString), 16); !ok {
+		if _, ok := n.SetString(s, 16); !ok {
 			return nil, fmt.Errorf("big.Int.SetString failed")
 		}
 
@@ -1171,7 +1235,7 @@ func (m *VM) value(v lib.TJSValue, free bool) (r any, err error) {
 		lib.EJS_TAG_STRING_ROPE, // -6,
 		lib.EJS_TAG_STRING:      // -7,
 
-		return goString(tls, ctx, v), nil
+		return m.goString(v)
 	case lib.EJS_TAG_OBJECT: // -1
 		return m.newObject(v)
 	case lib.EJS_TAG_INT: //  0,
@@ -1192,23 +1256,35 @@ func (m *VM) value(v lib.TJSValue, free bool) (r any, err error) {
 }
 
 // errStrProp reads the string-valued property 'name' from error value 'v',
-// returning "" when the property is absent or not a string. 'v' is borrowed.
+// returning "" when the property is absent or not a string, or when reading or
+// converting it throws. That exception is dropped, see errString. 'v' is
+// borrowed.
 func errStrProp(tls *libc.TLS, ctx uintptr, v lib.TJSValue, name uintptr) (r string) {
 	vr := lib.XJS_GetPropertyStr(tls, ctx, v, name)
+	if isException(vr) {
+		// A getter threw, or 'v' has no properties, as after 'throw null'.
+		dropException(tls, ctx)
+		return ""
+	}
 
 	defer lib.XFreeValue(tls, ctx, vr)
 
 	if tag(vr) == lib.EJS_TAG_STRING || tag(vr) == lib.EJS_TAG_STRING_ROPE {
-		return goString(tls, ctx, vr)
+		return errString(tls, ctx, vr)
 	}
 
 	return ""
 }
 
 // errIntProp reads the integer-valued property 'name' from error value 'v',
-// returning 0 when the property is absent or not numeric. 'v' is borrowed.
+// returning 0 when the property is absent or not numeric, or when reading it
+// throws. That exception is dropped, see errString. 'v' is borrowed.
 func errIntProp(tls *libc.TLS, ctx uintptr, v lib.TJSValue, name uintptr) (r int) {
 	vr := lib.XJS_GetPropertyStr(tls, ctx, v, name)
+	if isException(vr) {
+		dropException(tls, ctx)
+		return 0
+	}
 
 	defer lib.XFreeValue(tls, ctx, vr)
 
@@ -1228,12 +1304,18 @@ func errIntProp(tls *libc.TLS, ctx uintptr, v lib.TJSValue, name uintptr) (r int
 // 'v' is borrowed: ErrorFromValue does not free it and the caller remains
 // responsible for its lifetime. Like all VM operations it must be called from
 // the VM's own goroutine. See [Error] for which fields are populated.
+//
+// A field that cannot be read stays empty: the result of the Error method when
+// the toString of 'v' throws, a property whose getter throws, any property of
+// a value that has none, such as null, and a string when there is no memory
+// to convert it. ErrorFromValue drops the exceptions that reading throws, so
+// it leaves none pending.
 func ErrorFromValue(v Value) *Error {
 	tls := v.vm.runtime.tls
 	ctx := v.vm.cContext
 
 	return &Error{
-		raw:          goString(tls, ctx, v.v),
+		raw:          errString(tls, ctx, v.v),
 		Name:         errStrProp(tls, ctx, v.v, uintptr(unsafe.Pointer(&nameC[0]))),
 		Message:      errStrProp(tls, ctx, v.v, uintptr(unsafe.Pointer(&messageC[0]))),
 		Stack:        errStrProp(tls, ctx, v.v, uintptr(unsafe.Pointer(&stackC[0]))),
@@ -2054,7 +2136,12 @@ func (v Value) MarshalJSON() (r []byte, err error) {
 	}
 
 	// A copy: the JS buffer is released before this returns.
-	return []byte(goString(tls, ctx, json)), nil
+	s, err := v.vm.goString(json)
+	if err != nil {
+		return nil, err
+	}
+
+	return []byte(s), nil
 }
 
 // Dup returns a copy of 'v' while updating its reference count.
