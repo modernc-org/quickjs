@@ -116,6 +116,10 @@ registries keyed by an int32 "magic": `goFuncs` (+ `freeMagic` for reuse) under 
 handed out by the `staticMagic` atomic counter. Custom module loaders live in `customLoaders` under
 `customLoadersMu`. These globals are process-wide, not per-VM.
 
+`RegisterFunc` defines the global property with `JS_NewCFunction2` + `JS_DefinePropertyValueStr`.
+Never use `JS_SetPropertyFunctionList` on an object that may already have the property: it `abort()`s
+the process.
+
 ### Interrupt / eval timeout
 
 Each `VM` owns an `interruptData` struct (allocated in libc memory) holding `interrupt int32` and
