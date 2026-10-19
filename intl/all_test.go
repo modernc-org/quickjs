@@ -413,6 +413,51 @@ func TestErrors(t *testing.T) {
 	}
 }
 
+// TestOptionValidation checks options that ECMA-402 rejects with a RangeError
+// and that were accepted: a calendar or numbering system that does not have
+// the form of one, a unit that is not one of the sanctioned ones, and a
+// currency, unit or display option given for another style.
+func TestOptionValidation(t *testing.T) {
+	vm := newVM(t)
+	catch := func(src string) string {
+		return fmt.Sprintf("(() => {try {%s; return 'no error'} catch (e) {return e.constructor.name}})()", src)
+	}
+	tests := [][2]string{
+		// What has the form of a calendar or a numbering system is accepted,
+		// and the one implemented is used.
+		{`new Intl.DateTimeFormat('en-US', {calendar: 'buddhist'}).resolvedOptions().calendar`, "gregory"},
+		{`new Intl.NumberFormat('en-US', {numberingSystem: 'abc-defg'}).resolvedOptions().numberingSystem`, "latn"},
+		{catch(`new Intl.DateTimeFormat('en-US', {calendar: 'abc1'})`), "no error"},
+		{catch(`new Intl.NumberFormat('en-US', {style: 'unit', unit: 'kilometer-per-hour'})`), "no error"},
+		{catch(`new Intl.NumberFormat('en-US', {style: 'unit', unit: 'percent'})`), "no error"},
+		{catch(`new Intl.NumberFormat('en-US', {style: 'unit', unit: 'mile-scandinavian'})`), "no error"},
+	}
+	for _, src := range []string{
+		`new Intl.DateTimeFormat('en-US', {calendar: 'x'})`,
+		`new Intl.DateTimeFormat('en-US', {calendar: ''})`,
+		`new Intl.DateTimeFormat('en-US', {calendar: 'abc-de'})`,
+		`new Intl.DateTimeFormat('en-US', {calendar: 'abcdefghi'})`,
+		`new Intl.DateTimeFormat('en-US', {calendar: 'ab_cd'})`,
+		`new Intl.DateTimeFormat('en-US', {numberingSystem: 'xx'})`,
+		`new Intl.NumberFormat('en-US', {numberingSystem: 'latn-x'})`,
+		`new Intl.NumberFormat('en-US', {numberingSystem: ''})`,
+		`new Intl.NumberFormat('en-US', {style: 'unit', unit: 'furlong'})`,
+		`new Intl.NumberFormat('en-US', {style: 'unit', unit: 'Meter'})`,
+		`new Intl.NumberFormat('en-US', {style: 'unit', unit: 'meter-per-furlong'})`,
+		`new Intl.NumberFormat('en-US', {style: 'unit', unit: 'meter-per-second-per-second'})`,
+		`new Intl.NumberFormat('en-US', {style: 'unit', unit: 'square-meter'})`,
+		`new Intl.NumberFormat('en-US', {unit: 'furlong'})`,
+		`new Intl.NumberFormat('en-US', {currency: 'usd1'})`,
+		`new Intl.NumberFormat('en-US', {style: 'unit', unit: 'meter', currency: 'US'})`,
+		`new Intl.NumberFormat('en-US', {currencyDisplay: 'bogus'})`,
+		`new Intl.NumberFormat('en-US', {currencySign: 'bogus'})`,
+		`new Intl.NumberFormat('en-US', {unitDisplay: 'bogus'})`,
+	} {
+		tests = append(tests, [2]string{catch(src), "RangeError"})
+	}
+	evalTests(t, vm, tests)
+}
+
 // TestDefaultTimeZone checks that a formatter with no timeZone option uses the
 // host zone, the one resolvedOptions() reports.
 func TestDefaultTimeZone(t *testing.T) {

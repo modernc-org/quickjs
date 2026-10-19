@@ -83,6 +83,25 @@ func optInt(o map[string]any, key string, min, max int) (int, bool, error) {
 	return n, true, nil
 }
 
+// optType checks the option key, a calendar or a numbering system, which is
+// accepted whatever it names but has to have the form of a Unicode locale
+// extension type: alphanumeric subtags of three to eight characters joined by
+// hyphens.
+func optType(o map[string]any, key string) error {
+	v, ok := o[key]
+	if !ok {
+		return nil
+	}
+
+	s, _ := v.(string)
+	for _, subtag := range strings.Split(s, "-") {
+		if len(subtag) < 3 || len(subtag) > 8 || !isAlnum(subtag) {
+			return rangeError("invalid %s: %v", key, v)
+		}
+	}
+	return nil
+}
+
 // optBool returns the boolean valued option key and whether it was present.
 func optBool(o map[string]any, key string) (bool, bool) {
 	v, ok := o[key]

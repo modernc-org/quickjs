@@ -92,37 +92,50 @@ func resolveNumberFormat(req request) (*numberFormat, error) {
 		}
 	}
 
+	if err := optType(o, "numberingSystem"); err != nil {
+		return nil, err
+	}
+
+	// The currency and unit options are checked whatever the style, as
+	// ECMA-402 does, and used only by their own style.
+	currency, hasCurrency := o["currency"].(string)
+	switch {
+	case !hasCurrency && f.Style == "currency":
+		return nil, typeError("currency must be provided when style is 'currency'")
+	case hasCurrency && (len(currency) != 3 || !isAlpha(currency)):
+		return nil, rangeError("invalid currency code: %s", currency)
+	}
+
+	currencyDisplay, err := optDefault(o, "currencyDisplay", "symbol", "code", "symbol", "narrowSymbol", "name")
+	if err != nil {
+		return nil, err
+	}
+
+	currencySign, err := optDefault(o, "currencySign", "standard", "standard", "accounting")
+	if err != nil {
+		return nil, err
+	}
+
+	unit, hasUnit := o["unit"].(string)
+	switch {
+	case !hasUnit && f.Style == "unit":
+		return nil, typeError("unit must be provided when style is 'unit'")
+	case hasUnit && !wellFormedUnit(unit):
+		return nil, rangeError("invalid unit: %s", unit)
+	}
+
+	unitDisplay, err := optDefault(o, "unitDisplay", "short", "short", "narrow", "long")
+	if err != nil {
+		return nil, err
+	}
+
 	currencyDigits := 2
 	switch f.Style {
 	case "currency":
-		s, ok := o["currency"].(string)
-		if !ok {
-			return nil, typeError("currency must be provided when style is 'currency'")
-		}
-
-		if len(s) != 3 || !isAlpha(s) {
-			return nil, rangeError("invalid currency code: %s", s)
-		}
-
-		f.Currency = strings.ToUpper(s)
+		f.Currency, f.CurrencyDisplay, f.CurrencySign = strings.ToUpper(currency), currencyDisplay, currencySign
 		currencyDigits = currencyMinorUnits(f.Currency)
-		if f.CurrencyDisplay, err = optDefault(o, "currencyDisplay", "symbol", "code", "symbol", "narrowSymbol", "name"); err != nil {
-			return nil, err
-		}
-
-		if f.CurrencySign, err = optDefault(o, "currencySign", "standard", "standard", "accounting"); err != nil {
-			return nil, err
-		}
 	case "unit":
-		s, ok := o["unit"].(string)
-		if !ok {
-			return nil, typeError("unit must be provided when style is 'unit'")
-		}
-
-		f.Unit = s
-		if f.UnitDisplay, err = optDefault(o, "unitDisplay", "short", "short", "narrow", "long"); err != nil {
-			return nil, err
-		}
+		f.Unit, f.UnitDisplay = unit, unitDisplay
 	}
 
 	if err := f.digitOptions(o, currencyDigits); err != nil {

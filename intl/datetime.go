@@ -66,6 +66,12 @@ func resolveDateTimeFormat(req request, defaultZone string) (*dateTimeFormat, er
 		return nil, err
 	}
 
+	for _, key := range []string{"calendar", "numberingSystem"} {
+		if err := optType(o, key); err != nil {
+			return nil, err
+		}
+	}
+
 	// Only the gregorian calendar and latin digits are available. ECMA-402
 	// resolves an unavailable request to the locale's default and reports what
 	// it actually used, which is what happens here.

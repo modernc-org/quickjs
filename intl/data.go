@@ -234,9 +234,23 @@ var unitNames = map[string]unitForms{
 	"year":              {"yr", "yrs", true, "y", "year", "years"},
 }
 
+// wellFormedUnit reports whether unit is one ECMA-402 accepts: one of the
+// units it sanctions, all of which unitNames has, or two of them joined by
+// "-per-".
+func wellFormedUnit(unit string) bool {
+	num, den, ok := strings.Cut(unit, "-per-")
+	if !ok {
+		_, ok := unitNames[unit]
+		return ok
+	}
+
+	_, okNum := unitNames[num]
+	_, okDen := unitNames[den]
+	return okNum && okDen
+}
+
 // unitLabel returns the text following the amount for the unit option and
-// whether a space separates them. A unit this package has no name for stands in
-// for itself, so an exotic identifier formats oddly rather than throwing.
+// whether a space separates them. The unit is one wellFormedUnit accepts.
 func unitLabel(unit, display string, one bool) (string, bool) {
 	if num, den, ok := strings.Cut(unit, "-per-"); ok {
 		// The denominator of a compound unit takes its narrowest form, which is
