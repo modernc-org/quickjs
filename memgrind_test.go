@@ -119,6 +119,8 @@ func TestMemgrind2(t *testing.T) {
 	t.Run("stackLimit", TestStackLimit)
 	t.Run("callLookup", TestCallLookupError)
 	t.Run("errorFromOdd", TestErrorFromOddValues)
+	t.Run("goInvalidUTF8", TestGoInvalidUTF8)
+	t.Run("jsLoneSurrogate", TestJSLoneSurrogate)
 
 	if err := libc.MemAuditReport(); err != nil {
 		t.Fatal(err)

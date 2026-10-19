@@ -93,6 +93,7 @@
 package quickjs // import "modernc.org/quickjs"
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -100,9 +101,11 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 	"unsafe"
 
 	"modernc.org/libc"
@@ -251,6 +254,7 @@ func (m *VM) NewObjectValue() (r Value, err error) {
 func (m *VM) newString(s string) (r lib.TJSValue, err error) {
 	tls := m.runtime.tls
 	ctx := m.cContext
+	s = validUTF8(s)
 	p, err := libc.CString(s)
 	if err != nil {
 		return r, err
@@ -973,6 +977,7 @@ func (m *VM) convertArgs(goArgs ...any) (jsArgs, free []lib.TJSValue, err error)
 		case bool:
 			jsArgs = append(jsArgs, newBool(x))
 		case string:
+			x = validUTF8(x)
 			p, err := libc.CString(x)
 			if err != nil {
 				return nil, free, err
@@ -1120,7 +1125,7 @@ func cString(tls *libc.TLS, ctx uintptr, v lib.TJSValue) (s string, ok bool) {
 
 	defer lib.XJS_FreeCString(tls, ctx, p)
 
-	return string(unsafe.Slice((*byte)(unsafe.Pointer(p)), *(*libc.Tsize_t)(unsafe.Pointer(plen)))), true
+	return wellFormed(unsafe.Slice((*byte)(unsafe.Pointer(p)), *(*libc.Tsize_t)(unsafe.Pointer(plen)))), true
 }
 
 // goString is cString for a caller that returns the failure as its error: it
@@ -1152,6 +1157,74 @@ func errString(tls *libc.TLS, ctx uintptr, v lib.TJSValue) string {
 // dropException frees the exception pending in 'ctx'.
 func dropException(tls *libc.TLS, ctx uintptr) {
 	lib.XFreeValue(tls, ctx, lib.XJS_GetException(tls, ctx))
+}
+
+// cGoString returns the NUL terminated string 'p', which the engine wrote from
+// a Javascript string, as a Go string. See wellFormed.
+func cGoString(tls *libc.TLS, p uintptr) string {
+	return wellFormed(unsafe.Slice((*byte)(unsafe.Pointer(p)), libc.Xstrlen(tls, p)))
+}
+
+// wellFormed returns 'b', UTF-8 the engine wrote from a Javascript string, as a
+// Go string with U+FFFD for each lone surrogate. A Javascript string is UTF-16
+// and can hold one half of a surrogate pair without the other, for example
+// where code cut a string inside an emoji. The engine writes a pair as the one
+// character it encodes, but a lone surrogate as the three bytes of its code
+// point, 0xED 0xA0-0xBF 0x80-0xBF, which is not UTF-8: the Go string would
+// carry bytes that decode as three U+FFFD. Go's utf16.Decode, a browser's
+// TextEncoder and Node's Buffer make one U+FFFD of a lone surrogate, and so
+// does wellFormed. In valid UTF-8, 0xED is never followed by a byte above 0x9F,
+// and U+FFFD takes three bytes too, so the result is as long as 'b'.
+func wellFormed(b []byte) string {
+	var r []byte
+	for i := 0; ; {
+		j := bytes.IndexByte(b[i:], 0xed)
+		if j < 0 {
+			break
+		}
+
+		i += j
+		if i+2 >= len(b) {
+			break
+		}
+
+		if b[i+1] < 0xa0 {
+			i++
+			continue
+		}
+
+		if r == nil {
+			r = bytes.Clone(b)
+		}
+		copy(r[i:], "\uFFFD")
+		i += 3
+	}
+	if r == nil {
+		return string(b)
+	}
+
+	return unsafe.String(unsafe.SliceData(r), len(r))
+}
+
+// validUTF8 returns 's' with U+FFFD for each byte that does not start a valid
+// UTF-8 sequence, the Go -> Javascript counterpart of wellFormed. That is how
+// Go decodes a string, in a for range loop, to []rune or with utf16.Encode,
+// and how encoding/json writes one, so a string reaches Javascript the same
+// way whether it is passed as it is or inside a value converted through JSON.
+// Given invalid UTF-8, the engine skipped the bytes after an invalid one,
+// ASCII included, and decoded the three-byte form of a surrogate (CESU-8) as
+// that surrogate.
+func validUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+
+	var b strings.Builder
+	b.Grow(len(s) + 2*utf8.UTFMax)
+	for _, r := range s { // an invalid byte comes as utf8.RuneError
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func (m *VM) newObject(v lib.TJSValue) (r *Object, err error) {
@@ -1352,7 +1425,7 @@ var (
 )
 
 func throwTypeError(tls *libc.TLS, ctx uintptr, msg string) (r lib.TJSValue) {
-	p, err := libc.CString(msg)
+	p, err := libc.CString(validUTF8(msg))
 	if err != nil {
 		return lib.XJS_ThrowTypeError(tls, ctx, 0, 0)
 	}
@@ -1367,7 +1440,7 @@ func throwTypeError(tls *libc.TLS, ctx uintptr, msg string) (r lib.TJSValue) {
 }
 
 func throwInternalError(tls *libc.TLS, ctx uintptr, msg string) (r lib.TJSValue) {
-	p, err := libc.CString(msg)
+	p, err := libc.CString(validUTF8(msg))
 	if err != nil {
 		return lib.XJS_ThrowInternalError(tls, ctx, 0, 0)
 	}
@@ -1891,7 +1964,7 @@ func (m *VM) jsMap(in reflect.Value) (out lib.TJSValue, err error) {
 			}
 		}
 
-		p, err2 := libc.CString(kv.key)
+		p, err2 := libc.CString(validUTF8(kv.key))
 		if err2 != nil {
 			lib.XFreeValue(tls, ctx, jv)
 			lib.XFreeValue(tls, ctx, obj)
@@ -1965,7 +2038,7 @@ type Atom = lib.TJSAtom
 func (m *VM) NewAtom(s string) (r Atom, err error) {
 	tls := m.runtime.tls
 	ctx := m.cContext
-	p, err := libc.CString(s)
+	p, err := libc.CString(validUTF8(s))
 	if err != nil {
 		return lib.MJS_ATOM_NULL, fmt.Errorf("OOM")
 	}
@@ -2427,7 +2500,7 @@ type moduleLoaderState struct {
 // can safely call js_free() on it. We use lib.Xjs_strdup to let the C side handle
 // the 32-bit/64-bit memory tracking alignment natively.
 func jsMallocString(tls *libc.TLS, ctx uintptr, s string) uintptr {
-	temp, err := libc.CString(s)
+	temp, err := libc.CString(validUTF8(s))
 	if err != nil {
 		return 0
 	}
@@ -2483,11 +2556,11 @@ func customModuleNormalize(tls *libc.TLS, ctx uintptr, module_base_name, module_
 
 	baseName := ""
 	if module_base_name != 0 {
-		baseName = libc.GoString(module_base_name)
+		baseName = cGoString(tls, module_base_name)
 	}
 	name := ""
 	if module_name != 0 {
-		name = libc.GoString(module_name)
+		name = cGoString(tls, module_name)
 	}
 
 	normName, err := state.normalize(state.vm, baseName, name)
@@ -2510,7 +2583,7 @@ func customModuleLoader(tls *libc.TLS, ctx uintptr, module_name uintptr, opaque 
 
 	name := ""
 	if module_name != 0 {
-		name = libc.GoString(module_name)
+		name = cGoString(tls, module_name)
 	}
 
 	source, err := state.loader(state.vm, name)
