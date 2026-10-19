@@ -61,6 +61,7 @@ func (pc *PromiseCapability) Dup() *PromiseCapability {
 //	    return pc.Promise
 //	}, false)
 func (m *VM) NewPromiseCapability() (*PromiseCapability, error) {
+	m.usable()
 	tls := m.runtime.tls
 	ctx := m.cContext
 

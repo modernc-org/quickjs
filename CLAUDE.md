@@ -128,6 +128,14 @@ the value in `m.panicked` and throws an uncatchable `InternalError` (as the engi
 interrupt). Other Go code called from C goes through `hostCall` (module loader, normalizer).
 `leave()` and `errFromException()` re-panic with the original value in the Go code that called JS.
 
+`runtime.Goexit` (`t.Fatal`) and a panic in the engine itself cannot be kept out. Every Go/engine
+boundary (`enter`/`leave`, and `hostEnter`/`hostEnded` in `callGo` and `hostCall`) checks
+`Fcurrent_stack_frame` against where it was. A mismatch marks the VM `abandoned`, and from then on
+no engine code may run: closures over the dead frames hold non-detached var_refs, and freeing one
+writes to the freed TLS frame and alloca buffer. `enter` and `usable()` panic with `abandonedPanic`,
+`Value.Free` does nothing, and `Close` skips `JS_FreeContext`/`JS_FreeRuntime` and leaks them. A new
+entry point that uses the engine before `enter`, or without it, must call `usable()` first.
+
 ### Interrupt / eval timeout
 
 Each `VM` owns an `interruptData` struct (allocated in libc memory) holding `interrupt int32` and

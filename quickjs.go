@@ -241,6 +241,7 @@ func (m *VM) NewFloat64(n float64) Value {
 // Note: See the [Value] documentation for details about manual memory
 // management of Value objects.
 func (m *VM) NewString(s string) (r Value, err error) {
+	m.usable()
 	v, err := m.newString(s)
 	if err != nil {
 		return r, err
@@ -251,6 +252,7 @@ func (m *VM) NewString(s string) (r Value, err error) {
 
 // NewObjectValue returns a new Value representing '{}'.
 func (m *VM) NewObjectValue() (r Value, err error) {
+	m.usable()
 	return Value{vm: m, v: lib.XJS_NewObject(m.runtime.tls, m.cContext)}, nil
 }
 
@@ -439,6 +441,14 @@ type interrupter struct {
 //
 // Note: VM is not safe for concurrent use by multiple goroutines, except for
 // [VM.Interrupt].
+//
+// A Go function that Javascript calls may panic: the Javascript stops, without
+// running its catch or finally blocks, and the panic goes on in the Go code
+// that called that Javascript. runtime.Goexit, which t.Fatal calls, cannot be
+// stopped that way. It goes up through the engine and abandons the Javascript
+// it was running, as does a panic in the engine itself. Such a VM can only be
+// closed: every later method that uses the engine panics, [Value.Free] does
+// nothing, and Close leaks the engine's memory.
 type VM struct {
 	// intr is set by NewVM and never written again, so that Interrupt can
 	// read it while and after the VM closes.
@@ -464,6 +474,13 @@ type state struct {
 	// with, until the panic goes on in the Go code that called Javascript.
 	// See hostPanic.
 	panicked any
+	// frame is the engine's stack frame where the Go code running now was
+	// called: 0 outside of any Javascript, or the frame of the Javascript that
+	// called a Go function. See hostEnter.
+	frame uintptr
+	// abandoned is set once a Go panic or runtime.Goexit went up through
+	// engine functions. See enter.
+	abandoned bool
 }
 
 // NewVM returns a newly created VM.
@@ -514,7 +531,20 @@ func (m *VM) Interrupt() {
 // arms the eval timeout and clears a pending Interrupt. A call made by a Go
 // function that Javascript called runs within the timeout of the call that got
 // there, and an Interrupt requested meanwhile must still stop that one.
+//
+// A Go panic in the engine itself, or runtime.Goexit in a Go function that
+// Javascript called, goes up through the engine functions below it and
+// abandons them. Their frames stay on the engine's stack, and closures over
+// their variables point at memory that was freed. Any engine code that runs
+// then, even to free an object, can write to that memory. So the VM is
+// abandoned too: the engine runs no more code, enter panics with
+// abandonedPanic from then on, and Close leaks the engine's memory.
 func (m *VM) enter() {
+	if m.abandoned || m.stackFrame() != m.frame {
+		m.abandoned = true
+		panic(abandonedPanic)
+	}
+
 	if m.depth == 0 {
 		m.configureInterrupt()
 	}
@@ -525,7 +555,57 @@ func (m *VM) enter() {
 // by that Javascript panicked, the panic goes on from here.
 func (m *VM) leave() {
 	m.depth--
-	m.repanic()
+	if m.stackFrame() != m.frame {
+		// A Go panic or runtime.Goexit is going up through the engine.
+		m.abandoned = true
+	}
+	if !m.abandoned {
+		m.repanic()
+	}
+}
+
+// abandonedPanic is what a VM panics with once it was abandoned, see enter.
+const abandonedPanic = "quickjs: a Go panic or runtime.Goexit went up through the engine of this VM, which can now only be closed"
+
+// usable panics with abandonedPanic if 'm' was abandoned, see enter.
+func (m *VM) usable() {
+	if m.abandoned {
+		panic(abandonedPanic)
+	}
+}
+
+// stackFrame returns the engine's current stack frame.
+func (m *VM) stackFrame() uintptr {
+	return (*lib.TJSRuntime)(unsafe.Pointer(m.runtime.cRuntime)).Fcurrent_stack_frame
+}
+
+// hostEnter marks the start of Go code that Javascript called. It returns what
+// the deferred hostEnded needs.
+func (m *VM) hostEnter() (prev uintptr) {
+	prev = m.frame
+	m.frame = m.stackFrame()
+	return prev
+}
+
+// hostEnded marks the end of Go code that Javascript called, started by
+// hostEnter. It reports whether engine functions above the frame where the Go
+// code was called were abandoned (see enter). The panic or runtime.Goexit that
+// abandoned them then goes on up through the engine, as the engine must run no
+// more code. If the Go code returned, it recovered from such a panic, and
+// hostEnded panics with abandonedPanic instead.
+func (m *VM) hostEnded(prev uintptr, returned bool) bool {
+	frame := m.frame
+	m.frame = prev
+	if m.stackFrame() == frame {
+		return false
+	}
+
+	m.abandoned = true
+	if returned {
+		panic(abandonedPanic)
+	}
+
+	return true
 }
 
 func (m *VM) configureInterrupt() {
@@ -593,6 +673,15 @@ func (m *VM) Close() error {
 			freeMagic = append(freeMagic, magic)
 		}
 	}
+	if m.abandoned {
+		// The engine will never finalize the callbacks.
+		for magic, f := range goFuncs {
+			if f.vm == m {
+				delete(goFuncs, magic)
+				freeMagic = append(freeMagic, magic)
+			}
+		}
+	}
 	goFuncsMu.Unlock()
 
 	// Interrupt can run concurrently: it must see the flag gone before the
@@ -603,9 +692,17 @@ func (m *VM) Close() error {
 
 	libc.Xfree(tls, m.interruptData)
 	libc.Xfree(tls, m.toStringArgv)
-	lib.XJS_FreeContext(tls, ctx)
 	r := m.runtime
+	abandoned := m.abandoned
 	m.state = state{}
+	if abandoned {
+		// Freeing the objects can write to freed memory, see enter.
+		r.tls.Close()
+		*r = runtime{}
+		return nil
+	}
+
+	lib.XJS_FreeContext(tls, ctx)
 	return r.close()
 }
 
@@ -813,6 +910,7 @@ func (m *VM) EvalBytecode(bytecode []byte) (r any, err error) {
 // Note: See the [Value] documentation for details about manual memory
 // management of Value objects.
 func (m *VM) EvalBytecodeValue(bytecode []byte) (r Value, err error) {
+	m.usable()
 	tls := m.runtime.tls
 	ctx := m.cContext
 	ps, err := libc.CString(string(bytecode))
@@ -861,6 +959,7 @@ func (m *VM) EvalBytecodeValue(bytecode []byte) (r Value, err error) {
 //
 // Note: The bytecode format is linked to a given QuickJS version.
 func (m *VM) Compile(javascript string, flags int) ([]byte, error) {
+	m.usable()
 	tls := m.runtime.tls
 	ctx := m.cContext
 	// https://github.com/bellard/quickjs/blob/eb2c89087def1829ed99630cb14b549d7a98408c/qjsc.c#L346-L360
@@ -922,6 +1021,7 @@ func (m *VM) eval(js string, flags int) (r lib.TJSValue, err error) {
 // Note: See the [Value] documentation for details about manual memory
 // management of Value objects.
 func (m *VM) GlobalObject() (r Value) {
+	m.usable()
 	return Value{vm: m, v: m.globalObject()}
 }
 
@@ -1559,16 +1659,29 @@ func (m *VM) hostDone(tls *libc.TLS, ctx uintptr) (r lib.TJSValue, interrupted b
 // recovery, and reports whether it failed, by a panic or an interrupt. The
 // exception is then pending. See hostPanic and hostDone.
 func (m *VM) hostCall(tls *libc.TLS, ctx uintptr, what string, f func()) (failed bool) {
+	prev := m.hostEnter()
+	returned := false
 	defer func() {
-		if p := recover(); p != nil {
-			m.hostPanic(tls, ctx, what, p)
-			failed = true
+		switch {
+		case m.hostEnded(prev, returned):
+			// The panic or runtime.Goexit goes on up through the engine.
+		case returned:
+			_, failed = m.hostDone(tls, ctx)
+		default:
+			if p := recover(); p != nil {
+				m.hostPanic(tls, ctx, what, p)
+				failed = true
+				return
+			}
+
+			// runtime.Goexit, which goes on up through the engine.
+			m.abandoned = true
 		}
 	}()
 
 	f()
-	_, failed = m.hostDone(tls, ctx)
-	return failed
+	returned = true
+	return false
 }
 
 // throwUncatchable throws an InternalError with 'msg' that no catch or
@@ -1601,6 +1714,7 @@ func (m *VM) repanic() {
 
 // StdAddHelpers adds the 'print' and 'console' global objects to 'm'.
 func (m *VM) StdAddHelpers() error {
+	m.usable()
 	tls := m.runtime.tls
 	ctx := m.cContext
 	lib.Xjs_std_add_helpers(tls, ctx, -1, 0)
@@ -1735,6 +1849,7 @@ func (m *VM) RegisterHostFunc(name string, fn HostFunc) error {
 }
 
 func (m *VM) registerFunc(name string, f any, wantThis, host bool) (err error) {
+	m.usable()
 	if name == "" {
 		return fmt.Errorf("func name cannot be empty")
 	}
@@ -1914,20 +2029,40 @@ func callGo(tls *libc.TLS, ctx uintptr, this lib.TJSValue, argc int32, argv uint
 	}
 
 	m := info.vm
+	prev := m.hostEnter()
+	returned := false
 	defer func() {
-		if p := recover(); p != nil {
-			r = m.hostPanic(tls, ctx, "Go function "+info.name, p)
-			return
-		}
-
-		if e, ok := m.hostDone(tls, ctx); ok {
-			if !isException(r) {
-				lib.XFreeValue(tls, ctx, r)
+		switch {
+		case m.hostEnded(prev, returned):
+			// The panic or runtime.Goexit goes on up through the engine.
+		case returned:
+			if e, ok := m.hostDone(tls, ctx); ok {
+				if !isException(r) {
+					lib.XFreeValue(tls, ctx, r)
+				}
+				r = e
 			}
-			r = e
+		default:
+			if p := recover(); p != nil {
+				r = m.hostPanic(tls, ctx, "Go function "+info.name, p)
+				return
+			}
+
+			// runtime.Goexit, which goes on up through the engine.
+			m.abandoned = true
 		}
 	}()
 
+	r = m.callGoFunc(info, this, argc, argv)
+	returned = true
+	return r
+}
+
+// callGoFunc converts the arguments of a call of 'info' from Javascript, calls
+// it and converts its results.
+func (m *VM) callGoFunc(info *goFunc, this lib.TJSValue, argc int32, argv uintptr) (r lib.TJSValue) {
+	tls := m.runtime.tls
+	ctx := m.cContext
 	haveArgs := int(argc)
 	if haveArgs < info.minArgs {
 		return throwTypeError(tls, ctx, fmt.Sprintf("not enough arguments in call to %s", info.name))
@@ -2274,6 +2409,7 @@ type Atom = lib.TJSAtom
 
 // NewAtom returns an unique indentifier of 's' or an error, if any.
 func (m *VM) NewAtom(s string) (r Atom, err error) {
+	m.usable()
 	tls := m.runtime.tls
 	ctx := m.cContext
 	p, err := libc.CString(validUTF8(s))
@@ -2475,8 +2611,12 @@ func (v Value) Dup() Value {
 
 // Free marks 'v' as no longer used and updates its reference count. 'v' must
 // not be used afterwards.
+//
+// Free does nothing if the VM of 'v' was abandoned, see [VM].
 func (v *Value) Free() {
-	lib.XFreeValue(v.vm.runtime.tls, v.vm.cContext, v.v)
+	if !v.vm.abandoned {
+		lib.XFreeValue(v.vm.runtime.tls, v.vm.cContext, v.v)
+	}
 	*v = Value{}
 }
 
@@ -2635,6 +2775,7 @@ func (v Value) Then(onFulfilled, onRejected func(Value)) (_ Value, err error) {
 		return Value{}, fmt.Errorf("cannot call Then on a Value not associated with a VM")
 	}
 	m := v.vm
+	m.usable()
 	tls := m.runtime.tls
 	ctx := m.cContext
 
