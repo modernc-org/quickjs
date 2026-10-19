@@ -340,6 +340,28 @@ func TestBigIntToLocaleString(t *testing.T) {
 	})
 }
 
+// TestFunctionLengths checks the length property of what Register installs,
+// which ECMA-402 specifies: 0 for the constructors and the toLocale* methods,
+// which had the 2 of their two declared arguments.
+func TestFunctionLengths(t *testing.T) {
+	vm := newVM(t)
+	evalTests(t, vm, [][2]string{
+		{`Intl.DateTimeFormat.length`, "0"},
+		{`Intl.NumberFormat.length`, "0"},
+		{`Date.prototype.toLocaleString.length`, "0"},
+		{`Date.prototype.toLocaleDateString.length`, "0"},
+		{`Date.prototype.toLocaleTimeString.length`, "0"},
+		{`Number.prototype.toLocaleString.length`, "0"},
+		{`BigInt.prototype.toLocaleString.length`, "0"},
+		{`Intl.DateTimeFormat.supportedLocalesOf.length`, "1"},
+		{`Intl.getCanonicalLocales.length`, "1"},
+		{`Intl.NumberFormat.prototype.formatToParts.length`, "1"},
+		{`new Intl.NumberFormat().format.length`, "1"},
+		{`Intl.DateTimeFormat.prototype.resolvedOptions.length`, "0"},
+		{`JSON.stringify(Object.getOwnPropertyDescriptor(Intl.NumberFormat, 'length'))`, `{"value":0,"writable":false,"enumerable":false,"configurable":true}`},
+	})
+}
+
 // TestCompactCarry rounds compact notation up into the next power of a
 // thousand. That moved to the next suffix only without digit options and from
 // a thousand up: 999999 with maximumFractionDigits 1 was "1000K" and 999.9

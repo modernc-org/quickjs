@@ -275,6 +275,13 @@ func icuCorpus() (r []string) {
 			r = append(r, fmt.Sprintf(`new Date(1755300000000).%s('en-US',%s)`, m, opts))
 		}
 	}
+	for _, f := range []string{
+		"Intl.DateTimeFormat", "Intl.NumberFormat", "Date.prototype.toLocaleString", "Date.prototype.toLocaleDateString",
+		"Date.prototype.toLocaleTimeString", "Number.prototype.toLocaleString", "BigInt.prototype.toLocaleString",
+		"Intl.getCanonicalLocales", "Intl.NumberFormat.supportedLocalesOf", "Intl.DateTimeFormat.prototype.formatToParts",
+	} {
+		r = append(r, f+".length")
+	}
 	for _, v := range []string{"0n", "-1n", "123456789n", "-123456789012345678901234567890n"} {
 		for _, opts := range []string{`{}`, `{style:'currency',currency:'EUR'}`, `{notation:'compact'}`, `{minimumFractionDigits:2}`} {
 			r = append(r, fmt.Sprintf(`(%s).toLocaleString('en-US',%s)`, v, opts))

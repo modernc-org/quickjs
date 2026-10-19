@@ -46,6 +46,13 @@
 		Object.defineProperty(o, name, {value: value, writable: true, enumerable: false, configurable: true});
 	}
 
+	// ECMA-402 gives the constructors and the toLocale* methods a length of
+	// 0, whatever arguments they read.
+	function noLength(f) {
+		Object.defineProperty(f, 'length', {value: 0});
+		return f;
+	}
+
 	function defineTag(o, tag) {
 		if (typeof Symbol === 'function' && Symbol.toStringTag !== undefined) {
 			Object.defineProperty(o, Symbol.toStringTag, {value: tag, writable: false, enumerable: false, configurable: true});
@@ -214,6 +221,7 @@
 		return publicOptions(internal(this, 'DateTimeFormat').resolved);
 	});
 
+	noLength(DateTimeFormat);
 	defineMethod(DateTimeFormat, 'supportedLocalesOf', supportedLocalesOf);
 	defineTag(DateTimeFormat.prototype, 'Intl.DateTimeFormat');
 
@@ -294,6 +302,7 @@
 		return publicOptions(internal(this, 'NumberFormat').resolved);
 	});
 
+	noLength(NumberFormat);
 	defineMethod(NumberFormat, 'supportedLocalesOf', supportedLocalesOf);
 	defineTag(NumberFormat.prototype, 'Intl.NumberFormat');
 
@@ -354,38 +363,38 @@
 		});
 	}
 
-	defineMethod(Date.prototype, 'toLocaleString', function (locales, opts) {
+	defineMethod(Date.prototype, 'toLocaleString', noLength(function (locales, opts) {
 		const t = dateValueOf.call(this);
 		return t !== t ? 'Invalid Date' : dateFormatter(locales, opts, 'any', 'all').format(t);
-	});
+	}));
 
-	defineMethod(Date.prototype, 'toLocaleDateString', function (locales, opts) {
+	defineMethod(Date.prototype, 'toLocaleDateString', noLength(function (locales, opts) {
 		const t = dateValueOf.call(this);
 		return t !== t ? 'Invalid Date' : dateFormatter(locales, opts, 'date', 'date').format(t);
-	});
+	}));
 
-	defineMethod(Date.prototype, 'toLocaleTimeString', function (locales, opts) {
+	defineMethod(Date.prototype, 'toLocaleTimeString', noLength(function (locales, opts) {
 		const t = dateValueOf.call(this);
 		return t !== t ? 'Invalid Date' : dateFormatter(locales, opts, 'time', 'time').format(t);
-	});
+	}));
 
-	defineMethod(Number.prototype, 'toLocaleString', function (locales, opts) {
+	defineMethod(Number.prototype, 'toLocaleString', noLength(function (locales, opts) {
 		const v = numberValueOf.call(this);
 		return cached(cacheKey('number', locales, opts), function () {
 			return new NumberFormat(locales, opts);
 		}).format(v);
-	});
+	}));
 
 	// QuickJS has no BigInt.prototype.toLocaleString of its own: a BigInt
 	// found Object.prototype's, which writes it as toString does.
 	const bigintValueOf = BigInt.prototype.valueOf;
 
-	defineMethod(BigInt.prototype, 'toLocaleString', function (locales, opts) {
+	defineMethod(BigInt.prototype, 'toLocaleString', noLength(function (locales, opts) {
 		const v = bigintValueOf.call(this);
 		return cached(cacheKey('number', locales, opts), function () {
 			return new NumberFormat(locales, opts);
 		}).format(v);
-	});
+	}));
 })(
 	globalThis.__quickjs_intl_dtfResolve__,
 	globalThis.__quickjs_intl_dtfFormat__,
