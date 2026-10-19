@@ -90,6 +90,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"modernc.org/quickjs"
 )
@@ -97,15 +98,15 @@ import (
 //go:embed intl.js
 var shim string
 
-// hostFuncs are the names the shim reads its host functions from. It deletes
-// them from the global object once it has them.
-var hostFuncs = []string{
-	"__quickjs_intl_dtfResolve__",
-	"__quickjs_intl_dtfFormat__",
-	"__quickjs_intl_nfResolve__",
-	"__quickjs_intl_nfFormat__",
-	"__quickjs_intl_canonicalLocales__",
-}
+// hostFuncs name the host functions the shim reads from the global object, in
+// the order it expects them. It deletes them from there once it has them.
+var hostFuncs = []string{"dtfResolve", "dtfFormat", "nfResolve", "nfFormat", "canonicalLocales"}
+
+// registers numbers the calls of Register, which register the host functions
+// under names of their own. A Go function stays registered with its VM until
+// Close, so names shared by all of them would make the Register after a
+// failed one fail too, on a duplicate name.
+var registers atomic.Uint64
 
 type config struct {
 	timeZone string
@@ -138,7 +139,10 @@ func TimeZone(name string) Option { return func(c *config) { c.timeZone = name }
 // no-op, because it would otherwise drop that call's options. The formatters
 // hold no state outside the VM, so nothing has to be released; vm.Close does
 // it all.
-func Register(vm *quickjs.VM, opts ...Option) error {
+//
+// A Register that fails, for example when the VM runs out of memory or is
+// interrupted, leaves no Intl behind, and it can be called again.
+func Register(vm *quickjs.VM, opts ...Option) (err error) {
 	switch already, err := registered(vm); {
 	case err != nil:
 		return err
@@ -161,6 +165,20 @@ func Register(vm *quickjs.VM, opts ...Option) error {
 
 		c.timeZone = name
 	}
+	n := registers.Add(1)
+	names := make([]string, len(hostFuncs))
+	for i, s := range hostFuncs {
+		names[i] = fmt.Sprintf("__quickjs_intl_%s_%d__", s, n)
+	}
+	js, _ := json.Marshal(names)
+	defer func() {
+		if err != nil {
+			// The shim deletes the host functions from the global object
+			// first, but it may not have got that far.
+			vm.Eval("for (const n of "+string(js)+") delete globalThis[n]", quickjs.EvalGlobal)
+		}
+	}()
+
 	for i, fn := range []quickjs.HostFunc{
 		c.dtfResolve,
 		c.dtfFormat,
@@ -168,11 +186,11 @@ func Register(vm *quickjs.VM, opts ...Option) error {
 		c.nfFormat,
 		c.canonicalLocales,
 	} {
-		if err := vm.RegisterHostFunc(hostFuncs[i], fn); err != nil {
+		if err := vm.RegisterHostFunc(names[i], fn); err != nil {
 			return err
 		}
 	}
-	_, err := vm.Eval(shim, quickjs.EvalGlobal)
+	_, err = vm.Eval(shim+"("+string(js)+")", quickjs.EvalGlobal)
 	return err
 }
 

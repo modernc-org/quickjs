@@ -5,12 +5,26 @@
 // The javascript half of modernc.org/quickjs/intl. It owns the ECMA-402
 // surface - the constructors, their prototypes and the option plumbing the
 // spec makes observable - and leaves every formatting decision to the Go host
-// functions it is called with. See call() below for what crosses between them.
+// functions it reads from the global object. See call() below for what
+// crosses between them.
+//
+// This is a function expression: Register calls it with the names of the host
+// functions, which are different for every Register.
 
-(function (dtfResolve, dtfFormat, nfResolve, nfFormat, canonicalLocales) {
+(function (names) {
 	'use strict';
 
 	const g = globalThis;
+
+	// The host functions come off the global object before anything else,
+	// so that an install that fails part way leaves none of them in sight.
+	const host = [];
+	for (let i = 0; i < names.length; i++) {
+		host.push(g[names[i]]);
+		delete g[names[i]];
+	}
+	const dtfResolve = host[0], dtfFormat = host[1], nfResolve = host[2], nfFormat = host[3], canonicalLocales = host[4];
+
 	const internals = new WeakMap();
 
 	// A host function answers with its result as a string. An error instead
@@ -319,7 +333,6 @@
 	defineMethod(Intl, 'getCanonicalLocales', function (locales) {
 		return callJSON(canonicalLocales, [JSON.stringify(localeList(locales))]);
 	});
-	Object.defineProperty(g, 'Intl', {value: Intl, writable: true, enumerable: false, configurable: true});
 
 	// ------------------------------------------- the toLocale* methods ECMA-402
 	// replaces. Without them the engine's own fallbacks stay in place, and those
@@ -395,16 +408,9 @@
 			return new NumberFormat(locales, opts);
 		}).format(v);
 	}));
-})(
-	globalThis.__quickjs_intl_dtfResolve__,
-	globalThis.__quickjs_intl_dtfFormat__,
-	globalThis.__quickjs_intl_nfResolve__,
-	globalThis.__quickjs_intl_nfFormat__,
-	globalThis.__quickjs_intl_canonicalLocales__
-);
 
-delete globalThis.__quickjs_intl_dtfResolve__;
-delete globalThis.__quickjs_intl_dtfFormat__;
-delete globalThis.__quickjs_intl_nfResolve__;
-delete globalThis.__quickjs_intl_nfFormat__;
-delete globalThis.__quickjs_intl_canonicalLocales__;
+	// Intl goes on the global object last. The marker on it is what tells
+	// Register that Intl is installed, so an install that fails before gets
+	// another chance.
+	Object.defineProperty(g, 'Intl', {value: Intl, writable: true, enumerable: false, configurable: true});
+})

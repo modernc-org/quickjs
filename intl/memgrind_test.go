@@ -58,6 +58,7 @@ func TestMemgrind2(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	t.Run("registerRetry", TestRegisterRetry)
 	if err := libc.MemAuditReport(); err != nil {
 		t.Fatal(err)
 	}

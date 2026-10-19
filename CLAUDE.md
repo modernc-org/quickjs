@@ -158,8 +158,12 @@ time; a Go function that took that error for its own then kept the outer script 
   constructors and whose QuickJS fallbacks silently ignore the `timeZone` argument.
   - The javascript surface lives in `intl.js` (`go:embed`ed by `intl.go`) and every formatting
     decision in Go; they trade JSON over five `RegisterHostFunc` bridges that the shim deletes from
-    `globalThis` once it holds them. Nothing here touches a `Value`, so there is no `Dup`/`Free`
-    discipline to get wrong — `intl/memgrind_test.go` guards that (and `make leak` now runs `./...`).
+    `globalThis` first thing. Each `Register` names them anew (a counter): a registered Go function
+    stays until `Close`, so fixed names made a retry after a failed `Register` fail. `intl.js` is a
+    function expression that `Register` calls with those names, and it puts `Intl` (with the marker
+    `registered` looks for) on `globalThis` last. Nothing here touches a `Value`, so there is no
+    `Dup`/`Free` discipline to get wrong — `intl/memgrind_test.go` guards that (and `make leak` now
+    runs `./...`).
   - Locale data is en-US only: Go ships zoneinfo but no CLDR. The tables in `data.go` were extracted
     from ICU, not hand-written. Where CLDR data is missing the code falls back to something
     derivable (a GMT offset for a long time zone name, the code for a currency name), never to a

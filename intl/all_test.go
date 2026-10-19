@@ -652,6 +652,57 @@ func TestRegisterPerRealm(t *testing.T) {
 	})
 }
 
+// TestRegisterRetry makes Register fail part way, as running out of memory or
+// an interrupt can, and then calls it again. The failed one left its host
+// functions on the global object, and the next one failed on their names, or,
+// when Intl was already in place, took the half installed one for finished.
+//
+// It also runs under the memgrind allocator (TestMemgrind2).
+func TestRegisterRetry(t *testing.T) {
+	// The shim defines a format getter first, then Intl's members, the
+	// toLocale* methods and Intl last.
+	for _, prop := range []string{"format", "getCanonicalLocales", "toLocaleString", "Intl"} {
+		t.Run(prop, func(t *testing.T) {
+			vm, err := quickjs.NewVM()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			defer vm.Close()
+
+			eval(t, vm, fmt.Sprintf(`
+globalThis.realDefine = Object.defineProperty;
+Object.defineProperty = function (o, k, d) {
+	if (k === %q) {
+		throw new Error('injected');
+	}
+	return realDefine(o, k, d);
+}`, prop))
+			if err := Register(vm, TimeZone("UTC")); err == nil || !strings.Contains(err.Error(), "injected") {
+				t.Fatalf("got %v, want the injected error", err)
+			}
+
+			leftovers := `Object.getOwnPropertyNames(globalThis).filter(n => n.startsWith('__quickjs_intl')).join() + '|' + typeof Intl`
+			if got := fmt.Sprint(eval(t, vm, leftovers)); got != "|undefined" {
+				t.Errorf("the failed Register left %q", got)
+			}
+
+			eval(t, vm, `Object.defineProperty = realDefine`)
+			if err := Register(vm, TimeZone("UTC")); err != nil {
+				t.Fatalf("Register after a failed one: %v", err)
+			}
+
+			evalTests(t, vm, [][2]string{
+				{leftovers, "|object"},
+				{`new Intl.DateTimeFormat('en-US').format(new Date(0))`, "1/1/1970"},
+				{`new Date(0).toLocaleString('en-US', {timeZone: 'America/New_York'})`, "12/31/1969, 7:00:00 PM"},
+				{`(1234.5).toLocaleString('en-US')`, "1,234.5"},
+				{`(1234n).toLocaleString('en-US')`, "1,234"},
+			})
+		})
+	}
+}
+
 func TestRegisterOnManyVMs(t *testing.T) {
 	// Each VM gets its own host functions and its own default zone.
 	for _, tz := range []string{"UTC", "Europe/Prague", "Australia/Sydney"} {
