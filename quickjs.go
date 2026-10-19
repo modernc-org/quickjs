@@ -192,12 +192,15 @@ func (r *runtime) newVM() (*VM, error) {
 	}
 
 	return &VM{
-		cContext:      c,
-		int32_16:      lib.XNewInt32(r.tls, c, 16),
-		int32_2:       lib.XNewInt32(r.tls, c, 2),
-		interruptData: interruptData,
-		runtime:       r,
-		toStringArgv:  argv,
+		intr: &interrupter{data: interruptData},
+		state: state{
+			cContext:      c,
+			int32_16:      lib.XNewInt32(r.tls, c, 16),
+			int32_2:       lib.XNewInt32(r.tls, c, 2),
+			interruptData: interruptData,
+			runtime:       r,
+			toStringArgv:  argv,
+		},
 	}, nil
 }
 
@@ -385,23 +388,66 @@ func interruptHandler(tls *libc.TLS, rt, opaque uintptr) int32 {
 		return 1
 	}
 
-	if timeLimit := (*interruptData)(unsafe.Pointer(opaque)).timeLimit; timeLimit != 0 && time.Now().UnixNano() >= timeLimit {
+	if timeLimit := (*interruptData)(unsafe.Pointer(opaque)).timeLimit; timeLimit != 0 && monotonic() >= timeLimit {
 		return 1
 	}
 
 	return 0
 }
 
+// The eval timeout runs on the monotonic clock. A deadline on the wall clock
+// moves when the system clock is set while a script runs: set back, the
+// timeout fires that much later or never, set forward, it fires at once.
+var monotonicBase = time.Now()
+
+// monotonic returns the nanoseconds since monotonicBase, read from the
+// monotonic clock.
+func monotonic() int64 {
+	return int64(time.Since(monotonicBase))
+}
+
+// deadline returns what monotonic will return 'd' from now. When that does
+// not fit an int64, it returns the largest one, which is never reached,
+// instead of wrapping around to the past.
+func deadline(d time.Duration) int64 {
+	now := monotonic()
+	if int64(d) > math.MaxInt64-now {
+		return math.MaxInt64
+	}
+
+	return now + int64(d)
+}
+
 type interruptData struct {
 	interrupt int32 // Interrupt() pending
-	timeLimit int64 // stop when time.Now().UnixNano() > timeLimit
+	timeLimit int64 // stop when monotonic() >= timeLimit, 0 for no limit
+}
+
+// interrupter is how Interrupt reaches the interrupt flag from any goroutine.
+// The flag is in C memory, which Close frees, but the interrupter is Go memory
+// that stays valid after Close. Close clears 'data' under 'mu' before freeing
+// the flag, so Interrupt either sets the flag of a live VM or does nothing.
+// The mutex also tells the race detector that the two are ordered: it does not
+// see the atomic operations on the flag, which is not in Go memory.
+type interrupter struct {
+	mu   sync.Mutex
+	data uintptr // *interruptData, 0 from the start of Close
 }
 
 // VM represents a Javascript context (or Realm). Each VM has its
 // own global objects and system objects.
 //
-// Note: VM is not safe for concurrent use by multiple goroutines.
+// Note: VM is not safe for concurrent use by multiple goroutines, except for
+// [VM.Interrupt].
 type VM struct {
+	// intr is set by NewVM and never written again, so that Interrupt can
+	// read it while and after the VM closes.
+	intr *interrupter
+	state
+}
+
+// state is everything in a VM that Close clears.
+type state struct {
 	cContext uintptr // lib.TJSContext
 	goFuncs  map[string]int32
 	// Safe to share, not reference counted
@@ -411,6 +457,9 @@ type VM struct {
 	timeout       time.Duration
 	interruptData uintptr
 	toStringArgv  uintptr
+
+	// depth counts the calls into Javascript in progress, see enter.
+	depth int
 }
 
 // NewVM returns a newly created VM.
@@ -432,22 +481,52 @@ func NewVM() (*VM, error) {
 
 // SetEvalTimeout sets the timeout for the various eval functions. Passing
 // zero 'd' disables timeouts.
+//
+// The timeout starts when Go calls into Javascript. A Go function that
+// Javascript called and that evaluates more Javascript on 'm' gets no new
+// timeout, it runs in what is left of the outer one. The timeout runs on the
+// monotonic clock, so setting the system clock does not move it.
 func (m *VM) SetEvalTimeout(d time.Duration) error {
 	m.timeout = d
 	return nil
 }
 
 // Interrupt requests 'm' to interrupt Javascript evaluation. Interrupt
-// can be called asynchronously at any time m is evaluating a script.
+// can be called asynchronously, from any goroutine, at any time m is
+// evaluating a script. The request stays pending until the Go call into
+// Javascript returns: Javascript that a Go function called from Javascript
+// evaluates on 'm' does not clear it. Interrupt can also be called while 'm'
+// closes and after Close, where it does nothing.
 func (m *VM) Interrupt() {
-	atomic.StoreInt32(&(*interruptData)(unsafe.Pointer(m.interruptData)).interrupt, 1)
+	m.intr.mu.Lock()
+	if m.intr.data != 0 {
+		atomic.StoreInt32(&(*interruptData)(unsafe.Pointer(m.intr.data)).interrupt, 1)
+	}
+	m.intr.mu.Unlock()
+}
+
+// enter marks the start of a call into Javascript and must be paired with a
+// deferred leave. Only a call made from Go code that Javascript did not call
+// arms the eval timeout and clears a pending Interrupt. A call made by a Go
+// function that Javascript called runs within the timeout of the call that got
+// there, and an Interrupt requested meanwhile must still stop that one.
+func (m *VM) enter() {
+	if m.depth == 0 {
+		m.configureInterrupt()
+	}
+	m.depth++
+}
+
+// leave ends a call into Javascript started by enter.
+func (m *VM) leave() {
+	m.depth--
 }
 
 func (m *VM) configureInterrupt() {
 	if m.interruptData != 0 {
-		(*interruptData)(unsafe.Pointer(m.interruptData)).interrupt = 0
+		atomic.StoreInt32(&(*interruptData)(unsafe.Pointer(m.interruptData)).interrupt, 0)
 		if m.timeout != 0 {
-			(*interruptData)(unsafe.Pointer(m.interruptData)).timeLimit = time.Now().Add(m.timeout).UnixNano()
+			(*interruptData)(unsafe.Pointer(m.interruptData)).timeLimit = deadline(m.timeout)
 		} else {
 			(*interruptData)(unsafe.Pointer(m.interruptData)).timeLimit = 0
 		}
@@ -510,11 +589,17 @@ func (m *VM) Close() error {
 	}
 	goFuncsMu.Unlock()
 
+	// Interrupt can run concurrently: it must see the flag gone before the
+	// flag is freed.
+	m.intr.mu.Lock()
+	m.intr.data = 0
+	m.intr.mu.Unlock()
+
 	libc.Xfree(tls, m.interruptData)
 	libc.Xfree(tls, m.toStringArgv)
 	lib.XJS_FreeContext(tls, ctx)
 	r := m.runtime
-	*m = VM{}
+	m.state = state{}
 	return r.close()
 }
 
@@ -550,7 +635,8 @@ func (m *VM) Eval(javascript string, flags int) (r any, err error) {
 
 	defer libc.Xfree(tls, ps)
 
-	m.configureInterrupt()
+	m.enter()
+	defer m.leave()
 	return m.value(lib.XJS_Eval(tls, ctx, ps, libc.Tsize_t(len(javascript)), uintptr(unsafe.Pointer(&evalFN)), int32(flags)), true)
 }
 
@@ -561,7 +647,8 @@ func (m *VM) Eval(javascript string, flags int) (r any, err error) {
 // each turn to drain the microtask queue (so a resolved Promise's .then runs, a
 // pending await resumes, etc.). An exception thrown by a job is returned as an
 // error — the first one — while the remaining jobs still run; a self-feeding job
-// queue is bounded so it cannot hang the host.
+// queue is bounded so it cannot hang the host. An interrupt, by Interrupt or the
+// eval timeout, ends the drain: the remaining jobs stay queued.
 func (m *VM) ExecutePendingJobs() (n int, err error) {
 	tls := m.runtime.tls
 	rt := m.runtime.cRuntime
@@ -577,9 +664,10 @@ func (m *VM) ExecutePendingJobs() (n int, err error) {
 
 	// Re-arm the eval-timeout deadline, as the Eval* functions do. Draining runs JS
 	// (Promise reactions and async continuations), so without this the whole drain
-	// inherits a stale wall-clock deadline from the last Eval — one that has kept
+	// inherits a stale deadline from the last Eval — one that has kept
 	// ticking through idle time — and is spuriously interrupted.
-	m.configureInterrupt()
+	m.enter()
+	defer m.leave()
 
 	const maxJobs = 1 << 20 // bound a self-feeding microtask loop so it cannot hang the host
 	for n < maxJobs {
@@ -593,6 +681,17 @@ func (m *VM) ExecutePendingJobs() (n int, err error) {
 			if e := m.errFromException(); e != nil && err == nil {
 				err = e // report the first failure, keep draining the rest
 			}
+		}
+
+		if m.interruptData != 0 && interruptHandler(tls, 0, m.interruptData) != 0 {
+			// Interrupt or the eval timeout stopped the job, also when a
+			// promise took the exception the engine threw for it, and the
+			// job so did not fail. The jobs left must not run now, they
+			// stay queued.
+			if err == nil {
+				err = &Error{raw: "InternalError: interrupted", Name: "InternalError", Message: "interrupted"}
+			}
+			return n, err
 		}
 	}
 
@@ -615,7 +714,8 @@ func (m *VM) EvalThis(obj Value, javascript string, flags int) (r any, err error
 
 	defer libc.Xfree(tls, ps)
 
-	m.configureInterrupt()
+	m.enter()
+	defer m.leave()
 	return m.value(lib.XJS_EvalThis(tls, ctx, obj.v, ps, libc.Tsize_t(len(javascript)), uintptr(unsafe.Pointer(&evalFN)), int32(flags)), true)
 }
 
@@ -639,7 +739,8 @@ func (m *VM) EvalValue(javascript string, flags int) (r Value, err error) {
 
 	defer libc.Xfree(tls, ps)
 
-	m.configureInterrupt()
+	m.enter()
+	defer m.leave()
 	v := lib.XJS_Eval(tls, ctx, ps, libc.Tsize_t(len(javascript)), uintptr(unsafe.Pointer(&evalFN)), int32(flags))
 	if isException(v) {
 		lib.XFreeValue(tls, ctx, v)
@@ -662,7 +763,8 @@ func (m *VM) EvalThisValue(obj Value, javascript string, flags int) (r Value, er
 
 	defer libc.Xfree(tls, ps)
 
-	m.configureInterrupt()
+	m.enter()
+	defer m.leave()
 	v := lib.XJS_EvalThis(tls, ctx, obj.v, ps, libc.Tsize_t(len(javascript)), uintptr(unsafe.Pointer(&evalFN)), int32(flags))
 	if isException(v) {
 		lib.XFreeValue(tls, ctx, v)
@@ -712,7 +814,8 @@ func (m *VM) EvalBytecodeValue(bytecode []byte) (r Value, err error) {
 		return r, m.errFromException()
 	}
 
-	m.configureInterrupt()
+	m.enter()
+	defer m.leave()
 
 	var v lib.TJSValue
 	if tag(obj) == lib.EJS_TAG_MODULE {
@@ -795,7 +898,8 @@ func (m *VM) eval(js string, flags int) (r lib.TJSValue, err error) {
 
 	defer libc.Xfree(tls, ps)
 
-	m.configureInterrupt()
+	m.enter()
+	defer m.leave()
 	return lib.XJS_Eval(tls, ctx, ps, libc.Tsize_t(len(js)), uintptr(unsafe.Pointer(&evalFN)), int32(flags)), nil
 }
 
@@ -839,10 +943,11 @@ func (m *VM) Call(function string, args ...any) (r any, err error) {
 	defer libc.Xfree(tls, ps)
 
 	// Re-arm the eval-timeout deadline, as the Eval* functions do: Call runs JS (it
-	// evaluates the function reference and invokes it), so without this the wall-clock
+	// evaluates the function reference and invokes it), so without this the
 	// deadline set by the last Eval keeps ticking through idle time and interrupts a
 	// later Call that has not itself run long.
-	m.configureInterrupt()
+	m.enter()
+	defer m.leave()
 
 	f := lib.XJS_Eval(tls, ctx, ps, libc.Tsize_t(len(function)), uintptr(unsafe.Pointer(&evalFN)), int32(EvalGlobal))
 	if isException(f) {
@@ -876,7 +981,8 @@ func (m *VM) CallValue(function string, args ...any) (r Value, err error) {
 	defer libc.Xfree(tls, ps)
 
 	// Re-arm the eval-timeout deadline, as the Eval* functions do (see Call).
-	m.configureInterrupt()
+	m.enter()
+	defer m.leave()
 
 	f := lib.XJS_Eval(tls, ctx, ps, libc.Tsize_t(len(function)), uintptr(unsafe.Pointer(&evalFN)), int32(EvalGlobal))
 	if isException(f) {
@@ -1376,6 +1482,8 @@ func errIntProp(tls *libc.TLS, ctx uintptr, v lib.TJSValue, name uintptr) (r int
 func ErrorFromValue(v Value) *Error {
 	tls := v.vm.runtime.tls
 	ctx := v.vm.cContext
+	v.vm.enter() // toString and getters run Javascript
+	defer v.vm.leave()
 
 	return &Error{
 		raw:          errString(tls, ctx, v.v),
@@ -1396,6 +1504,30 @@ func (m *VM) errFromException() error {
 	defer lib.XFreeValue(tls, ctx, e)
 
 	return ErrorFromValue(Value{vm: m, v: e})
+}
+
+// hostDone is called when Go code that Javascript called returns. If 'm' is
+// interrupted, by Interrupt or the eval timeout, it throws what the engine
+// throws then, returns the exception and reports true: the Javascript that
+// called the Go code must end too, whatever the Go code returned. The engine
+// checks for an interrupt only now and then, and it could find it inside
+// Javascript the Go code evaluated on 'm' every time. The Go code got that as
+// an error and could take it for one of its own, so the script calling it in a
+// loop never ended.
+func (m *VM) hostDone(tls *libc.TLS, ctx uintptr) (r lib.TJSValue, interrupted bool) {
+	if m.interruptData == 0 || interruptHandler(tls, 0, m.interruptData) == 0 {
+		return r, false
+	}
+
+	return throwUncatchable(tls, ctx, "interrupted"), true
+}
+
+// throwUncatchable throws an InternalError with 'msg' that no catch or
+// finally block of a script runs for, as the engine does for an interrupt.
+func throwUncatchable(tls *libc.TLS, ctx uintptr, msg string) lib.TJSValue {
+	r := throwInternalError(tls, ctx, msg)
+	lib.XJS_SetUncatchableException(tls, ctx, 1)
+	return r
 }
 
 // StdAddHelpers adds the 'print' and 'console' global objects to 'm'.
@@ -1713,6 +1845,15 @@ func callGo(tls *libc.TLS, ctx uintptr, this lib.TJSValue, argc int32, argv uint
 	}
 
 	m := info.vm
+	defer func() {
+		if e, ok := m.hostDone(tls, ctx); ok {
+			if !isException(r) {
+				lib.XFreeValue(tls, ctx, r)
+			}
+			r = e
+		}
+	}()
+
 	haveArgs := int(argc)
 	if haveArgs < info.minArgs {
 		return throwTypeError(tls, ctx, fmt.Sprintf("not enough arguments in call to %s", info.name))
@@ -2079,6 +2220,8 @@ func (m *VM) NewAtom(s string) (r Atom, err error) {
 func (m *VM) SetPropertyValue(this Value, prop Atom, val Value) (err error) {
 	tls := m.runtime.tls
 	ctx := m.cContext
+	m.enter() // a setter or a proxy runs Javascript
+	defer m.leave()
 	dup := val.Dup()
 	if lib.XSetProperty(tls, ctx, this.v, prop, dup.v) < 0 {
 		return fmt.Errorf("failed to set property")
@@ -2091,6 +2234,8 @@ func (m *VM) SetPropertyValue(this Value, prop Atom, val Value) (err error) {
 func (m *VM) SetProperty(this Value, prop Atom, val any) (err error) {
 	tls := m.runtime.tls
 	ctx := m.cContext
+	m.enter()
+	defer m.leave()
 	jsArgs, free, err := m.convertArgs(val)
 	if err != nil {
 		return err
@@ -2114,6 +2259,8 @@ func (m *VM) SetProperty(this Value, prop Atom, val any) (err error) {
 func (m *VM) GetPropertyValue(this Value, prop Atom) (r Value, err error) {
 	tls := m.runtime.tls
 	ctx := m.cContext
+	m.enter() // a getter or a proxy runs Javascript
+	defer m.leave()
 	v := lib.XGetProperty(tls, ctx, this.v, prop)
 	if isException(v) {
 		err = m.errFromException()
@@ -2125,6 +2272,8 @@ func (m *VM) GetPropertyValue(this Value, prop Atom) (r Value, err error) {
 func (m *VM) GetProperty(this Value, prop Atom) (r any, err error) {
 	tls := m.runtime.tls
 	ctx := m.cContext
+	m.enter()
+	defer m.leave()
 	return m.value(lib.XGetProperty(tls, ctx, this.v, prop), true)
 }
 
@@ -2223,6 +2372,8 @@ func (v Value) Property(prop Atom) (r any, err error) {
 func (v Value) MarshalJSON() (r []byte, err error) {
 	tls := v.vm.runtime.tls
 	ctx := v.vm.cContext
+	v.vm.enter() // toJSON runs Javascript
+	defer v.vm.leave()
 	json := lib.XJS_JSONStringify(tls, ctx, v.v, undefined, undefined)
 
 	defer lib.XFreeValue(tls, ctx, json)
@@ -2258,6 +2409,8 @@ func (v *Value) Free() {
 // Any attemtps to convert 'v' to any using the same rules as there are for
 // the return value of VM.Eval.
 func (v Value) Any() (r any, err error) {
+	v.vm.enter() // toJSON and toString run Javascript
+	defer v.vm.leave()
 	return v.vm.value(v.v, false)
 }
 
@@ -2292,7 +2445,8 @@ func (v Value) Call(this Value, args ...any) (r any, err error) {
 	}
 
 	// Re-arm the eval-timeout deadline, as the Eval* functions do (see VM.Call).
-	v.vm.configureInterrupt()
+	v.vm.enter()
+	defer v.vm.leave()
 	return v.vm.call(v.v, this.v, args...)
 }
 
@@ -2454,7 +2608,8 @@ func (v Value) Then(onFulfilled, onRejected func(Value)) (_ Value, err error) {
 	// fetching and invoking .then runs Javascript (a then getter or a
 	// user-overridden then), so without this the deadline from the last Eval
 	// keeps ticking through idle time and could interrupt this call.
-	m.configureInterrupt()
+	m.enter()
+	defer m.leave()
 	thenFn := lib.XGetProperty(tls, ctx, v.v, lib.EJS_ATOM_then)
 	result := lib.XJS_Call(tls, ctx, thenFn, v.v, 2, jsArgsPtr)
 	lib.XFreeValue(tls, ctx, thenFn)
@@ -2478,7 +2633,8 @@ func (v Value) CallValue(this Value, args ...any) (r Value, err error) {
 	}
 
 	// Re-arm the eval-timeout deadline, as the Eval* functions do (see VM.Call).
-	v.vm.configureInterrupt()
+	v.vm.enter()
+	defer v.vm.leave()
 	return v.vm.callValue(v.v, this.v, args...)
 }
 

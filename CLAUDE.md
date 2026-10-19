@@ -77,7 +77,9 @@ canonical way to validate `Dup`/`Free` pairing — see the `TestMemgrind` doc.
 
 - `runtime` (unexported): wraps `lib.TJSRuntime` plus its own `*libc.TLS`. One TLS per runtime.
 - `VM` (the main handle): wraps a `lib.TJSContext` (a JS realm). Created by `NewVM()`, released by
-  `Close()`. **Not safe for concurrent use by multiple goroutines** — same for `runtime`.
+  `Close()`. **Not safe for concurrent use by multiple goroutines** — same for `runtime` — except
+  `Interrupt()`. Its fields are `intr` (set once, never cleared) plus an embedded `state` that `Close`
+  zeroes as a whole; `*m = VM{}` would write `intr` and race with a concurrent `Interrupt`.
   `newRuntime` sets the stack limit to `lib.MaxStackSlots` explicitly: in libquickjs v0.13.1 and older
   `JS_NewRuntime` sets 1 MB, which the port's slot-counting stack check reads as a million slots, and
   infinite recursion then overflows the goroutine stack, a fatal error, before the engine throws. Newer
@@ -123,11 +125,19 @@ the process.
 ### Interrupt / eval timeout
 
 Each `VM` owns an `interruptData` struct (allocated in libc memory) holding `interrupt int32` and
-`timeLimit int64`. Every eval-family entry point (`Eval`, `EvalValue`, `Call`, `CallValue`,
-`ExecutePendingJobs`, …) calls `configureInterrupt()` **first** to re-arm the deadline from
-`m.timeout`; the C-side `interruptHandler` polls both fields. `SetEvalTimeout` sets the duration;
-`Interrupt()` sets the flag atomically for async cancellation from another goroutine. When adding a new
-entry point that runs JS, remember to call `configureInterrupt()` or the timeout won't apply.
+`timeLimit int64`, the deadline in nanoseconds of the monotonic clock (`monotonic()`, `deadline()`).
+Every eval-family entry point (`Eval`, `EvalValue`, `Call`, `CallValue`, `ExecutePendingJobs`, …)
+starts with `m.enter()` + `defer m.leave()`. Only the outermost `enter` (`m.depth == 0`) calls
+`configureInterrupt()` to re-arm the deadline from `m.timeout` and clear the flag: JS evaluated by a Go
+function that JS called must neither extend the timeout nor swallow an `Interrupt`. The C-side
+`interruptHandler` polls both fields. `SetEvalTimeout` sets the duration; `Interrupt()` reaches the
+flag through `m.intr` (Go memory, mutex) so it is safe from any goroutine, also during and after
+`Close`. When adding a new entry point that runs JS (also through a getter, setter, `toJSON` or
+`toString`), use `enter`/`leave`, or the timeout does not apply, and `hostDone` could read
+a stale deadline. `hostDone` runs when Go code called from JS returns: if the
+VM is interrupted it throws the engine's uncatchable `InternalError: interrupted` in place of the
+result. The engine polls only every ~10000 steps, and the poll could land inside a nested `Eval` every
+time; a Go function that took that error for its own then kept the outer script running forever.
 
 ## Sub-packages and generated assets
 
