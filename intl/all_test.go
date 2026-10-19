@@ -266,6 +266,27 @@ func TestDigitOptions(t *testing.T) {
 	})
 }
 
+// TestCompactCarry rounds compact notation up into the next power of a
+// thousand. That moved to the next suffix only without digit options and from
+// a thousand up: 999999 with maximumFractionDigits 1 was "1000K" and 999.9
+// was "1000".
+func TestCompactCarry(t *testing.T) {
+	vm := newVM(t)
+	evalTests(t, vm, [][2]string{
+		{`new Intl.NumberFormat('en-US', {notation: 'compact'}).format(999.9)`, "1K"},
+		{`new Intl.NumberFormat('en-US', {notation: 'compact'}).format(999999)`, "1M"},
+		{`new Intl.NumberFormat('en-US', {notation: 'compact', maximumFractionDigits: 1}).format(999.95)`, "1K"},
+		{`new Intl.NumberFormat('en-US', {notation: 'compact', maximumFractionDigits: 1}).format(999949)`, "999.9K"},
+		{`new Intl.NumberFormat('en-US', {notation: 'compact', maximumFractionDigits: 1}).format(-999999)`, "-1M"},
+		{`new Intl.NumberFormat('en-US', {notation: 'compact', maximumFractionDigits: 0}).format(999500)`, "1M"},
+		{`new Intl.NumberFormat('en-US', {notation: 'compact', maximumSignificantDigits: 2}).format(995)`, "1K"},
+		{`new Intl.NumberFormat('en-US', {notation: 'compact', maximumSignificantDigits: 2}).format(999999)`, "1M"},
+		{`new Intl.NumberFormat('en-US', {notation: 'compact', minimumFractionDigits: 2}).format(999999)`, "999.999K"},
+		// Past a trillion there is no next suffix.
+		{`new Intl.NumberFormat('en-US', {notation: 'compact', maximumFractionDigits: 1}).format(999.95e12)`, "1000T"},
+	})
+}
+
 // TestICURules pins the en-US rules this package was checked against a full
 // ICU (node's Intl) for. They are the ones no reading of the spec gives you:
 // which field widens to two digits next to which other one, where compact

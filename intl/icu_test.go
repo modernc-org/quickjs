@@ -275,7 +275,7 @@ func icuCorpus() (r []string) {
 		`{style:'currency',currency:'USD',currencySign:'accounting'}`, `{style:'currency',currency:'BHD'}`,
 		`{style:'currency',currency:'USD',maximumFractionDigits:0}`,
 		`{style:'currency',currency:'USD',maximumFractionDigits:1}`,
-		`{maximumSignificantDigits:3,maximumFractionDigits:200}`,
+		`{maximumSignificantDigits:3,maximumFractionDigits:200}`, `{notation:'compact',maximumFractionDigits:1}`,
 		`{style:'unit',unit:'liter'}`, `{style:'unit',unit:'kilometer'}`,
 		`{style:'unit',unit:'kilometer-per-hour'}`, `{style:'unit',unit:'byte'}`,
 		`{style:'unit',unit:'megabyte',unitDisplay:'long'}`, `{style:'unit',unit:'day',unitDisplay:'long'}`,

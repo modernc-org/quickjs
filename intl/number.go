@@ -285,6 +285,7 @@ func (f *numberFormat) format(v any) ([]part, error) {
 	}
 
 	var exponent, compact int
+	unscaled := d
 	switch f.Notation {
 	case "scientific":
 		exponent = d.magnitude()
@@ -294,32 +295,16 @@ func (f *numberFormat) format(v any) ([]part, error) {
 		exponent -= ((exponent % 3) + 3) % 3
 		d = d.scale(-exponent)
 	case "compact":
-		compact, d = compactScale(d, 0)
+		compact, d = compactScale(d)
 	}
 
-	minFrac := 0
-	switch {
-	case f.CompactRound:
-		d = compactRound(d, f.RoundingMode)
-		if compact != 0 && d.intDigits() > 3 {
-			// 999999 rounds up to 1000K, which is 1M.
-			compact, d = compactScale(d.scale(compact), compact+3)
-			d = compactRound(d, f.RoundingMode)
-		}
-	case f.MaximumSignificantDigits != nil:
-		d = d.roundTo(*f.MaximumSignificantDigits, f.RoundingMode)
-		// Zero has no significant digit of its own, but the "0" written for it
-		// counts as the first one, so minimumSignificantDigits 3 is "0.00".
-		digits := d.exp
-		if d.isZero() {
-			digits = 1
-		}
-		if minFrac = *f.MinimumSignificantDigits - digits; minFrac < 0 {
-			minFrac = 0
-		}
-	default:
-		d = d.roundFrac(*f.MaximumFractionDigits, f.RoundingMode)
-		minFrac = *f.MinimumFractionDigits
+	d, minFrac := f.round(d)
+	if f.Notation == "compact" && compact < 12 && d.intDigits() > 3 {
+		// Rounding carried into the next power of a thousand: 999999 is 1M,
+		// not 1000K, and 999.9 is 1K. The value is rounded again from the
+		// start, as there are fewer digits to round to now.
+		compact += 3
+		d, minFrac = f.round(unscaled.scale(-compact))
 	}
 	if f.TrailingZeroDisplay == "stripIfInteger" && !d.hasFraction() {
 		minFrac = 0
@@ -369,6 +354,26 @@ func (f *numberFormat) format(v any) ([]part, error) {
 		}
 	}
 	return f.wrap(r, neg, zero), nil
+}
+
+// round rounds d, the digits to show before any exponent or compact suffix, as
+// the digit options say, and returns it with the number of fraction digits to
+// show at least.
+func (f *numberFormat) round(d dec) (_ dec, minFrac int) {
+	switch {
+	case f.CompactRound:
+		return compactRound(d, f.RoundingMode), 0
+	case f.MaximumSignificantDigits != nil:
+		d = d.roundTo(*f.MaximumSignificantDigits, f.RoundingMode)
+		// Zero has no significant digit of its own, but the "0" written for it
+		// counts as the first one, so minimumSignificantDigits 3 is "0.00".
+		digits := d.exp
+		if d.isZero() {
+			digits = 1
+		}
+		return d, max(*f.MinimumSignificantDigits-digits, 0)
+	}
+	return d.roundFrac(*f.MaximumFractionDigits, f.RoundingMode), *f.MinimumFractionDigits
 }
 
 // wrap adds the sign, the currency symbol and the percent or unit marker around
@@ -484,12 +489,13 @@ func numberValue(v any) (dec, string) {
 }
 
 // compactScale divides d by the largest power of a thousand not greater than
-// it, at least min, and returns that power's exponent along with the result.
-func compactScale(d dec, min int) (int, dec) {
+// it, up to a trillion, and returns that power's exponent along with the
+// result.
+func compactScale(d dec) (int, dec) {
 	m := d.magnitude() / 3 * 3
 	switch {
-	case d.magnitude() < 3 || m < min:
-		m = min
+	case d.magnitude() < 3:
+		m = 0
 	case m > 12:
 		m = 12
 	}
