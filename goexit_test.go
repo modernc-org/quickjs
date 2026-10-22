@@ -174,6 +174,21 @@ func rawPanic(tls *libc.TLS, ctx uintptr, this lib.TJSValue, argc int32, argv ui
 
 var bottomName = [...]byte{'b', 'o', 't', 't', 'o', 'm', 0}
 
+// defineRawPanic defines the global bottom as rawPanic.
+func defineRawPanic(t *testing.T, m *VM) {
+	t.Helper()
+	tls := m.runtime.tls
+	ctx := m.cContext
+	name := uintptr(unsafe.Pointer(&bottomName[0]))
+	g := lib.XJS_GetGlobalObject(tls, ctx)
+	f := lib.XJS_NewCFunction2(tls, ctx, fp(rawPanic), name, 0, lib.EJS_CFUNC_generic_magic, 0)
+	if lib.XJS_SetPropertyStr(tls, ctx, g, name, f) < 0 {
+		t.Fatal("cannot define bottom")
+	}
+
+	lib.XFreeValue(tls, ctx, g)
+}
+
 // TestEnginePanic panics in the engine, which abandons the frames above the
 // Go code that recovers the panic, wherever that is. As for runtime.Goexit,
 // the VM can then only be closed.
@@ -209,18 +224,47 @@ func TestEnginePanic(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			m, keep := newDownVM(t)
-			tls := m.runtime.tls
-			ctx := m.cContext
-			name := uintptr(unsafe.Pointer(&bottomName[0]))
-			g := lib.XJS_GetGlobalObject(tls, ctx)
-			f := lib.XJS_NewCFunction2(tls, ctx, fp(rawPanic), name, 0, lib.EJS_CFUNC_generic_magic, 0)
-			if lib.XJS_SetPropertyStr(tls, ctx, g, name, f) < 0 {
-				t.Fatal("cannot define bottom")
-			}
-
-			lib.XFreeValue(tls, ctx, g)
+			defineRawPanic(t, m)
 			if p := recovered(func() { test.run(m) }); p != test.want {
 				t.Fatalf("recovered %v, want %v", p, test.want)
+			}
+
+			onlyCloses(t, m, keep)
+		})
+	}
+}
+
+// TestAbandonedFree checks the deferred frees of the Go code that called
+// Javascript. They run while a Go panic or runtime.Goexit goes up through the
+// engine, before leave sees it, and must not run engine code then. VM.Call
+// frees that way the function it evaluates from its name, and bottom keeps a
+// reference count that nothing else changes.
+func TestAbandonedFree(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		define func(*testing.T, *VM)
+		ended  func(func()) bool // reports whether the call ended as it must
+	}{
+		{"Goexit", func(t *testing.T, m *VM) { m.RegisterFunc("bottom", goruntime.Goexit, false) }, goexited},
+		{"engine panic", defineRawPanic, func(f func()) bool { return recovered(f) == enginePanic }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m, keep := newDownVM(t)
+			test.define(t, m)
+			bottom, err := m.EvalValue("bottom", EvalGlobal)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// The JSRefCountHeader comes right before the object.
+			refs := (*int32)(unsafe.Pointer(jsvToPtr(bottom.v) - unsafe.Sizeof(lib.TJSRefCountHeader{})))
+			want := *refs + 1 // what Call took
+			if !test.ended(func() { m.Call("bottom") }) {
+				t.Fatal("Call returned")
+			}
+
+			if *refs != want {
+				t.Errorf("reference count %d, want %d", *refs, want)
 			}
 
 			onlyCloses(t, m, keep)

@@ -574,6 +574,19 @@ func (m *VM) usable() {
 	}
 }
 
+// free frees 'v' unless 'm' was abandoned, see enter. The deferred frees of
+// the Go code that called Javascript use it: they run also while a Go panic or
+// runtime.Goexit goes up through the engine, before leave can mark the VM
+// abandoned.
+func (m *VM) free(v lib.TJSValue) {
+	if m.abandoned || m.stackFrame() != m.frame {
+		m.abandoned = true
+		return
+	}
+
+	lib.XFreeValue(m.runtime.tls, m.cContext, v)
+}
+
 // stackFrame returns the engine's current stack frame.
 func (m *VM) stackFrame() uintptr {
 	return (*lib.TJSRuntime)(unsafe.Pointer(m.runtime.cRuntime)).Fcurrent_stack_frame
@@ -971,7 +984,7 @@ func (m *VM) Compile(javascript string, flags int) ([]byte, error) {
 		return nil, err
 	}
 
-	defer lib.XFreeValue(tls, ctx, v)
+	defer m.free(v)
 
 	if isException(v) {
 		return nil, m.errFromException()
@@ -1071,11 +1084,11 @@ func (m *VM) Call(function string, args ...any) (r any, err error) {
 		return nil, m.errFromException()
 	}
 
-	defer lib.XFreeValue(tls, ctx, f)
+	defer m.free(f)
 
 	g := m.globalObject()
 
-	defer lib.XFreeValue(tls, ctx, g)
+	defer m.free(g)
 
 	return m.call(f, g, args...)
 }
@@ -1103,11 +1116,11 @@ func (m *VM) CallValue(function string, args ...any) (r Value, err error) {
 		return r, m.errFromException() // see Call
 	}
 
-	defer lib.XFreeValue(tls, ctx, f)
+	defer m.free(f)
 
 	g := m.globalObject()
 
-	defer lib.XFreeValue(tls, ctx, g)
+	defer m.free(g)
 
 	return m.callValue(f, g, args...)
 }
@@ -1119,7 +1132,7 @@ func (m *VM) convertArgs(goArgs ...any) (jsArgs, free []lib.TJSValue, err error)
 	defer func() {
 		if err != nil && len(free) != 0 {
 			for _, v := range free {
-				lib.XFreeValue(tls, ctx, v)
+				m.free(v)
 			}
 			free = nil
 		}
@@ -1245,7 +1258,7 @@ func (m *VM) callValue(f, this lib.TJSValue, args ...any) (r Value, err error) {
 	if len(free) != 0 {
 		defer func() {
 			for _, v := range free {
-				lib.XFreeValue(tls, ctx, v)
+				m.free(v)
 			}
 		}()
 	}
@@ -1285,7 +1298,7 @@ func (m *VM) call(f, this lib.TJSValue, args ...any) (r any, err error) {
 	if len(free) != 0 {
 		defer func() {
 			for _, v := range free {
-				lib.XFreeValue(tls, ctx, v)
+				m.free(v)
 			}
 		}()
 	}
@@ -1442,7 +1455,7 @@ func (m *VM) newObject(v lib.TJSValue) (r *Object, err error) {
 	ctx := m.cContext
 	json := lib.XJS_JSONStringify(tls, ctx, v, undefined, undefined)
 
-	defer lib.XFreeValue(tls, ctx, json)
+	defer m.free(json)
 
 	if isException(json) {
 		return nil, m.errFromException()
@@ -1476,7 +1489,7 @@ func (m *VM) value(v lib.TJSValue, free bool) (r any, err error) {
 	ctx := m.cContext
 	if free && tag(v) < 0 {
 		// all tags with a reference count are negative
-		defer lib.XFreeValue(tls, ctx, v)
+		defer m.free(v)
 	}
 
 	switch tag(v) {
@@ -1489,7 +1502,7 @@ func (m *VM) value(v lib.TJSValue, free bool) (r any, err error) {
 			return nil, m.errFromException()
 		}
 
-		defer lib.XFreeValue(tls, ctx, ps)
+		defer m.free(ps)
 
 		if tag(ps) != lib.EJS_TAG_OBJECT {
 			return nil, fmt.Errorf("failed to get BigInt.toString()")
@@ -1501,7 +1514,7 @@ func (m *VM) value(v lib.TJSValue, free bool) (r any, err error) {
 			return nil, m.errFromException()
 		}
 
-		defer lib.XFreeValue(tls, ctx, jsString)
+		defer m.free(jsString)
 
 		s, err := m.goString(jsString)
 		if err != nil {
@@ -1542,7 +1555,9 @@ func (m *VM) value(v lib.TJSValue, free bool) (r any, err error) {
 // returning "" when the property is absent or not a string, or when reading or
 // converting it throws. That exception is dropped, see errString. 'v' is
 // borrowed.
-func errStrProp(tls *libc.TLS, ctx uintptr, v lib.TJSValue, name uintptr) (r string) {
+func (m *VM) errStrProp(v lib.TJSValue, name uintptr) (r string) {
+	tls := m.runtime.tls
+	ctx := m.cContext
 	vr := lib.XJS_GetPropertyStr(tls, ctx, v, name)
 	if isException(vr) {
 		// A getter threw, or 'v' has no properties, as after 'throw null'.
@@ -1550,7 +1565,7 @@ func errStrProp(tls *libc.TLS, ctx uintptr, v lib.TJSValue, name uintptr) (r str
 		return ""
 	}
 
-	defer lib.XFreeValue(tls, ctx, vr)
+	defer m.free(vr)
 
 	if tag(vr) == lib.EJS_TAG_STRING || tag(vr) == lib.EJS_TAG_STRING_ROPE {
 		return errString(tls, ctx, vr)
@@ -1562,14 +1577,16 @@ func errStrProp(tls *libc.TLS, ctx uintptr, v lib.TJSValue, name uintptr) (r str
 // errIntProp reads the integer-valued property 'name' from error value 'v',
 // returning 0 when the property is absent or not numeric, or when reading it
 // throws. That exception is dropped, see errString. 'v' is borrowed.
-func errIntProp(tls *libc.TLS, ctx uintptr, v lib.TJSValue, name uintptr) (r int) {
+func (m *VM) errIntProp(v lib.TJSValue, name uintptr) (r int) {
+	tls := m.runtime.tls
+	ctx := m.cContext
 	vr := lib.XJS_GetPropertyStr(tls, ctx, v, name)
 	if isException(vr) {
 		dropException(tls, ctx)
 		return 0
 	}
 
-	defer lib.XFreeValue(tls, ctx, vr)
+	defer m.free(vr)
 
 	switch tag(vr) {
 	case lib.EJS_TAG_INT:
@@ -1594,19 +1611,18 @@ func errIntProp(tls *libc.TLS, ctx uintptr, v lib.TJSValue, name uintptr) (r int
 // to convert it. ErrorFromValue drops the exceptions that reading throws, so
 // it leaves none pending.
 func ErrorFromValue(v Value) *Error {
-	tls := v.vm.runtime.tls
-	ctx := v.vm.cContext
-	v.vm.enter() // toString and getters run Javascript
-	defer v.vm.leave()
+	m := v.vm
+	m.enter() // toString and getters run Javascript
+	defer m.leave()
 
 	return &Error{
-		raw:          errString(tls, ctx, v.v),
-		Name:         errStrProp(tls, ctx, v.v, uintptr(unsafe.Pointer(&nameC[0]))),
-		Message:      errStrProp(tls, ctx, v.v, uintptr(unsafe.Pointer(&messageC[0]))),
-		Stack:        errStrProp(tls, ctx, v.v, uintptr(unsafe.Pointer(&stackC[0]))),
-		LineNumber:   errIntProp(tls, ctx, v.v, uintptr(unsafe.Pointer(&lineNumC[0]))),
-		ColumnNumber: errIntProp(tls, ctx, v.v, uintptr(unsafe.Pointer(&colNumC[0]))),
-		FileName:     errStrProp(tls, ctx, v.v, uintptr(unsafe.Pointer(&fileNameC[0]))),
+		raw:          errString(m.runtime.tls, m.cContext, v.v),
+		Name:         m.errStrProp(v.v, uintptr(unsafe.Pointer(&nameC[0]))),
+		Message:      m.errStrProp(v.v, uintptr(unsafe.Pointer(&messageC[0]))),
+		Stack:        m.errStrProp(v.v, uintptr(unsafe.Pointer(&stackC[0]))),
+		LineNumber:   m.errIntProp(v.v, uintptr(unsafe.Pointer(&lineNumC[0]))),
+		ColumnNumber: m.errIntProp(v.v, uintptr(unsafe.Pointer(&colNumC[0]))),
+		FileName:     m.errStrProp(v.v, uintptr(unsafe.Pointer(&fileNameC[0]))),
 	}
 }
 
@@ -1615,7 +1631,7 @@ func (m *VM) errFromException() error {
 	ctx := m.cContext
 	e := lib.XJS_GetException(tls, ctx)
 
-	defer lib.XFreeValue(tls, ctx, e)
+	defer m.free(e)
 
 	// The exception hostPanic threw in place of a panic is not an error: the
 	// panic goes on.
@@ -1950,7 +1966,7 @@ func (m *VM) defineFunc(name string, magic, length int32) error {
 
 	g := m.globalObject()
 
-	defer lib.XFreeValue(tls, ctx, g)
+	defer m.free(g)
 
 	// JS_DefinePropertyValueStr takes over 'fn', also when it fails.
 	if lib.XJS_DefinePropertyValueStr(tls, ctx, g, cName, fn, lib.MJS_PROP_WRITABLE|lib.MJS_PROP_CONFIGURABLE|lib.MJS_PROP_THROW) < 0 {
@@ -2078,7 +2094,7 @@ func (m *VM) callGoFunc(info *goFunc, this lib.TJSValue, argc int32, argv uintpt
 		switch {
 		case isNative(info.in[0]):
 			dup := lib.XDupValue(tls, ctx, this)
-			defer lib.XFreeValue(tls, ctx, dup)
+			defer m.free(dup)
 			in = append(in, reflect.ValueOf(Value{vm: m, v: dup}))
 		default:
 			v, err := m.value(this, false)
@@ -2114,7 +2130,7 @@ func (m *VM) callGoFunc(info *goFunc, this lib.TJSValue, argc int32, argv uintpt
 		switch {
 		case isNative(typ):
 			dup := lib.XDupValue(tls, ctx, *(*lib.TJSValue)(unsafe.Pointer(argv)))
-			defer lib.XFreeValue(tls, ctx, dup)
+			defer m.free(dup)
 			in = append(in, reflect.ValueOf(Value{vm: m, v: dup}))
 		default:
 			v, err := m.value(*(*lib.TJSValue)(unsafe.Pointer(argv)), false)
@@ -2442,8 +2458,6 @@ func (m *VM) SetPropertyValue(this Value, prop Atom, val Value) (err error) {
 
 // SetProperty sets this.prop = val.
 func (m *VM) SetProperty(this Value, prop Atom, val any) (err error) {
-	tls := m.runtime.tls
-	ctx := m.cContext
 	m.enter()
 	defer m.leave()
 	jsArgs, free, err := m.convertArgs(val)
@@ -2454,7 +2468,7 @@ func (m *VM) SetProperty(this Value, prop Atom, val any) (err error) {
 	if len(free) != 0 {
 		defer func() {
 			for _, v := range free {
-				lib.XFreeValue(tls, ctx, v)
+				m.free(v)
 			}
 		}()
 	}
@@ -2586,7 +2600,7 @@ func (v Value) MarshalJSON() (r []byte, err error) {
 	defer v.vm.leave()
 	json := lib.XJS_JSONStringify(tls, ctx, v.v, undefined, undefined)
 
-	defer lib.XFreeValue(tls, ctx, json)
+	defer v.vm.free(json)
 
 	if isException(json) {
 		return nil, v.vm.errFromException()
@@ -2801,7 +2815,7 @@ func (v Value) Then(onFulfilled, onRejected func(Value)) (_ Value, err error) {
 			if magics[i] < 0 {
 				continue
 			}
-			lib.XFreeValue(tls, ctx, jsArgs[i])
+			m.free(jsArgs[i])
 		}
 	}()
 

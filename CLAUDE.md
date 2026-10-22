@@ -134,7 +134,9 @@ boundary (`enter`/`leave`, and `hostEnter`/`hostEnded` in `callGo` and `hostCall
 no engine code may run: closures over the dead frames hold non-detached var_refs, and freeing one
 writes to the freed TLS frame and alloca buffer. `enter` and `usable()` panic with `abandonedPanic`,
 `Value.Free` does nothing, and `Close` skips `JS_FreeContext`/`JS_FreeRuntime` and leaks them. A new
-entry point that uses the engine before `enter`, or without it, must call `usable()` first.
+entry point that uses the engine before `enter`, or without it, must call `usable()` first. A deferred
+free runs while the panic goes up, before `leave` sees it: write `defer m.free(v)`, which makes the
+same check, never `defer lib.XFreeValue(...)`.
 
 ### Interrupt / eval timeout
 
