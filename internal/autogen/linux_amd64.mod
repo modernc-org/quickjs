@@ -6,7 +6,7 @@ require (
 	golang.org/x/mod v0.42.0
 	modernc.org/fileutil v1.4.0
 	modernc.org/libc v1.79.0
-	modernc.org/libquickjs v0.13.1
+	modernc.org/libquickjs v0.14.0
 )
 
 require (
