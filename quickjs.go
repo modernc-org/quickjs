@@ -25,7 +25,7 @@
 // is better. Detailed results available in the testdata/benchmarks directory.
 //
 //	 CCGO: modernc.org/libquickjs@v0.14.0
-//	 GOJA: github.com/dop251/goja@v0.0.0-20260723142020-b4aef50fa347
+//	 GOJA: github.com/dop251/goja@v0.0.0-20261022125820-07c4b9d6265b
 //	  QJS: github.com/fastschema/qjs@v0.0.6
 //
 //		                        CCGO     GOJA     QJS
