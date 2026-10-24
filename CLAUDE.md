@@ -138,6 +138,17 @@ entry point that uses the engine before `enter`, or without it, must call `usabl
 free runs while the panic goes up, before `leave` sees it: write `defer m.free(v)`, which makes the
 same check, never `defer lib.XFreeValue(...)`.
 
+### Strings between Go and Javascript
+
+Every string crossing the boundary goes through `m.toJS` (Go -> JS) or `m.fromJS` (JS -> Go), never
+`validUTF8`/`wellFormed` directly: those two pick by `VM.SetWTF8`. By default a lone surrogate
+becomes U+FFFD both ways (v0.26.0); with `SetWTF8(true)` it crosses as its three-byte form, which
+`JS_ToCStringLen2` writes and `JS_NewStringLen` decodes, and any other invalid byte from Go still
+becomes U+FFFD. modernc.org/webview needs the lossless mode for a DOM kept in Go. A new site with no
+`VM` at hand has to get one (the module callbacks use `state.vm`), or pass ASCII. Anything converted
+through encoding/json (structs, `Call` arguments of other types, `Object.Into`) gets U+FFFD in
+either mode.
+
 ### Interrupt / eval timeout
 
 Each `VM` owns an `interruptData` struct (allocated in libc memory) holding `interrupt int32` and

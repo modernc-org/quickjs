@@ -259,7 +259,7 @@ func (m *VM) NewObjectValue() (r Value, err error) {
 func (m *VM) newString(s string) (r lib.TJSValue, err error) {
 	tls := m.runtime.tls
 	ctx := m.cContext
-	s = validUTF8(s)
+	s = m.toJS(s)
 	p, err := libc.CString(s)
 	if err != nil {
 		return r, err
@@ -481,6 +481,8 @@ type state struct {
 	// abandoned is set once a Go panic or runtime.Goexit went up through
 	// engine functions. See enter.
 	abandoned bool
+	// wtf8 is set by SetWTF8, see toJS and fromJS.
+	wtf8 bool
 }
 
 // NewVM returns a newly created VM.
@@ -510,6 +512,36 @@ func NewVM() (*VM, error) {
 func (m *VM) SetEvalTimeout(d time.Duration) error {
 	m.timeout = d
 	return nil
+}
+
+// SetWTF8 sets whether strings cross between Go and Javascript on 'm' as
+// WTF-8, which keeps a lone surrogate. A Javascript string is a sequence of
+// UTF-16 code units and can hold one half of a surrogate pair without the
+// other, for example where code cut a string inside an emoji or built it one
+// code unit at a time. UTF-8 cannot encode a lone surrogate, so by default it
+// becomes U+FFFD on the way to Go, and each byte of a Go string that does not
+// start a valid UTF-8 sequence becomes U+FFFD on the way to Javascript. A lone
+// surrogate then does not survive a round trip through Go, and two halves of a
+// pair kept apart in Go do not make the character again.
+//
+// With 'on' true, a lone surrogate reaches Go as the three bytes of its code
+// point, 0xED 0xA0-0xBF 0x80-0xBF, and a pair as the four bytes of the
+// character it encodes. Go strings reach Javascript with those three bytes
+// decoded as that code unit, so a high surrogate followed by a low one makes a
+// pair, as when Go concatenates two strings that each hold one half. Any other
+// byte that does not start a valid UTF-8 sequence still becomes U+FFFD. That
+// applies to every string converted for 'm': values, arguments and results of
+// Go functions, the keys and elements of the maps and slices they return,
+// atoms, the names of functions registered after the call, the messages of
+// errors and module names. Strings converted with encoding/json get U+FFFD
+// either way: those in a struct a Go function returns, in a map, a slice or a
+// struct passed to [VM.Call], [Value.Call], [VM.SetProperty] and the like, and
+// in the result of [Object.Into].
+//
+// A Go string holding a lone surrogate is not valid UTF-8: a for range loop
+// over it, utf8.ValidString and encoding/json see three invalid bytes.
+func (m *VM) SetWTF8(on bool) {
+	m.wtf8 = on
 }
 
 // Interrupt requests 'm' to interrupt Javascript evaluation. Interrupt
@@ -1200,7 +1232,7 @@ func (m *VM) convertArgs(goArgs ...any) (jsArgs, free []lib.TJSValue, err error)
 		case bool:
 			jsArgs = append(jsArgs, newBool(x))
 		case string:
-			x = validUTF8(x)
+			x = m.toJS(x)
 			p, err := libc.CString(x)
 			if err != nil {
 				return nil, free, err
@@ -1332,7 +1364,9 @@ func (m *VM) call(f, this lib.TJSValue, args ...any) (r any, err error) {
 // characters or one built by concatenation needs, can run out of memory, and a
 // value that is not a string has its toString called. 'ok' is then false and
 // the exception is left pending, see [VM.goString] and errString.
-func cString(tls *libc.TLS, ctx uintptr, v lib.TJSValue) (s string, ok bool) {
+func (m *VM) cString(v lib.TJSValue) (s string, ok bool) {
+	tls := m.runtime.tls
+	ctx := m.cContext
 	// The out-parameter lives on the emulated C stack, never the Go stack: the
 	// transpiled callee holds it as a uintptr, which a Go stack move would leave
 	// dangling.
@@ -1348,14 +1382,14 @@ func cString(tls *libc.TLS, ctx uintptr, v lib.TJSValue) (s string, ok bool) {
 
 	defer lib.XJS_FreeCString(tls, ctx, p)
 
-	return wellFormed(unsafe.Slice((*byte)(unsafe.Pointer(p)), *(*libc.Tsize_t)(unsafe.Pointer(plen)))), true
+	return m.fromJS(unsafe.Slice((*byte)(unsafe.Pointer(p)), *(*libc.Tsize_t)(unsafe.Pointer(plen)))), true
 }
 
 // goString is cString for a caller that returns the failure as its error: it
 // takes the exception out of the context, for example the engine's out of
 // memory error, and returns it.
 func (m *VM) goString(v lib.TJSValue) (string, error) {
-	s, ok := cString(m.runtime.tls, m.cContext, v)
+	s, ok := m.cString(v)
 	if !ok {
 		return "", m.errFromException()
 	}
@@ -1368,10 +1402,10 @@ func (m *VM) goString(v lib.TJSValue) (string, error) {
 // recursing. errString drops the exception of a failed conversion and returns
 // "": the exception being read is the one to report, and one left pending
 // would be reported by the next unrelated call that finds it.
-func errString(tls *libc.TLS, ctx uintptr, v lib.TJSValue) string {
-	s, ok := cString(tls, ctx, v)
+func (m *VM) errString(v lib.TJSValue) string {
+	s, ok := m.cString(v)
 	if !ok {
-		dropException(tls, ctx)
+		dropException(m.runtime.tls, m.cContext)
 	}
 
 	return s
@@ -1383,9 +1417,31 @@ func dropException(tls *libc.TLS, ctx uintptr) {
 }
 
 // cGoString returns the NUL terminated string 'p', which the engine wrote from
-// a Javascript string, as a Go string. See wellFormed.
-func cGoString(tls *libc.TLS, p uintptr) string {
-	return wellFormed(unsafe.Slice((*byte)(unsafe.Pointer(p)), libc.Xstrlen(tls, p)))
+// a Javascript string, as a Go string. See fromJS.
+func (m *VM) cGoString(tls *libc.TLS, p uintptr) string {
+	return m.fromJS(unsafe.Slice((*byte)(unsafe.Pointer(p)), libc.Xstrlen(tls, p)))
+}
+
+// fromJS returns 'b', UTF-8 the engine wrote from a Javascript string, as a Go
+// string: as it is, which is WTF-8, when 'm' is set to keep lone surrogates,
+// see [VM.SetWTF8], and through wellFormed otherwise.
+func (m *VM) fromJS(b []byte) string {
+	if m.wtf8 {
+		return string(b)
+	}
+
+	return wellFormed(b)
+}
+
+// toJS returns 's' as 'm' hands a Go string to the engine: through validWTF8
+// when 'm' is set to keep lone surrogates, see [VM.SetWTF8], and through
+// validUTF8 otherwise.
+func (m *VM) toJS(s string) string {
+	if m.wtf8 {
+		return validWTF8(s)
+	}
+
+	return validUTF8(s)
 }
 
 // wellFormed returns 'b', UTF-8 the engine wrote from a Javascript string, as a
@@ -1448,6 +1504,39 @@ func validUTF8(s string) string {
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// validWTF8 is validUTF8 that keeps the three-byte form of a surrogate, which
+// the engine decodes as that code unit. Unlike in WTF-8, a high surrogate
+// followed by a low one may come in that form too, as when Go concatenates
+// two strings that each hold one half of a pair. In Javascript the two make
+// the pair. See [VM.SetWTF8].
+func validWTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+
+	var b strings.Builder
+	b.Grow(len(s) + 2*utf8.UTFMax)
+	for i := 0; i < len(s); {
+		if isSurrogate(s[i:]) {
+			b.WriteString(s[i : i+3])
+			i += 3
+			continue
+		}
+
+		r, n := utf8.DecodeRuneInString(s[i:]) // an invalid byte comes as utf8.RuneError
+		b.WriteRune(r)
+		i += n
+	}
+	return b.String()
+}
+
+// isSurrogate reports whether 's' starts with the three bytes of a surrogate's
+// code point, 0xED 0xA0-0xBF 0x80-0xBF, which the engine writes for a lone
+// one.
+func isSurrogate(s string) bool {
+	return len(s) >= 3 && s[0] == 0xed && s[1] >= 0xa0 && s[1] <= 0xbf && s[2] >= 0x80 && s[2] <= 0xbf
 }
 
 func (m *VM) newObject(v lib.TJSValue) (r *Object, err error) {
@@ -1568,7 +1657,7 @@ func (m *VM) errStrProp(v lib.TJSValue, name uintptr) (r string) {
 	defer m.free(vr)
 
 	if tag(vr) == lib.EJS_TAG_STRING || tag(vr) == lib.EJS_TAG_STRING_ROPE {
-		return errString(tls, ctx, vr)
+		return m.errString(vr)
 	}
 
 	return ""
@@ -1616,7 +1705,7 @@ func ErrorFromValue(v Value) *Error {
 	defer m.leave()
 
 	return &Error{
-		raw:          errString(m.runtime.tls, m.cContext, v.v),
+		raw:          m.errString(v.v),
 		Name:         m.errStrProp(v.v, uintptr(unsafe.Pointer(&nameC[0]))),
 		Message:      m.errStrProp(v.v, uintptr(unsafe.Pointer(&messageC[0]))),
 		Stack:        m.errStrProp(v.v, uintptr(unsafe.Pointer(&stackC[0]))),
@@ -1652,7 +1741,7 @@ func (m *VM) hostPanic(tls *libc.TLS, ctx uintptr, what string, p any) lib.TJSVa
 	if m.panicked == nil {
 		m.panicked = p
 	}
-	return throwUncatchable(tls, ctx, fmt.Sprintf("panic in %s: %v", what, p))
+	return m.throwUncatchable(tls, ctx, fmt.Sprintf("panic in %s: %v", what, p))
 }
 
 // hostDone is called when Go code that Javascript called returns. If 'm' is
@@ -1668,7 +1757,7 @@ func (m *VM) hostDone(tls *libc.TLS, ctx uintptr) (r lib.TJSValue, interrupted b
 		return r, false
 	}
 
-	return throwUncatchable(tls, ctx, "interrupted"), true
+	return m.throwUncatchable(tls, ctx, "interrupted"), true
 }
 
 // hostCall runs 'f', Go code that Javascript called and that has no other
@@ -1702,8 +1791,8 @@ func (m *VM) hostCall(tls *libc.TLS, ctx uintptr, what string, f func()) (failed
 
 // throwUncatchable throws an InternalError with 'msg' that no catch or
 // finally block of a script runs for, as the engine does for an interrupt.
-func throwUncatchable(tls *libc.TLS, ctx uintptr, msg string) lib.TJSValue {
-	r := throwInternalError(tls, ctx, msg)
+func (m *VM) throwUncatchable(tls *libc.TLS, ctx uintptr, msg string) lib.TJSValue {
+	r := m.throwInternalError(tls, ctx, msg)
 	lib.XJS_SetUncatchableException(tls, ctx, 1)
 	return r
 }
@@ -1745,25 +1834,20 @@ var (
 	percentS  = uintptr(unsafe.Pointer(&percentSC[0]))
 )
 
-func throwTypeError(tls *libc.TLS, ctx uintptr, msg string) (r lib.TJSValue) {
-	p, err := libc.CString(validUTF8(msg))
-	if err != nil {
-		return lib.XJS_ThrowTypeError(tls, ctx, 0, 0)
-	}
-
-	defer libc.Xfree(tls, p)
-
-	bp := tls.Alloc(16)
-
-	defer tls.Free(16)
-
-	return lib.XJS_ThrowTypeError(tls, ctx, percentS, libc.VaList(bp+8, p))
+func (m *VM) throwTypeError(tls *libc.TLS, ctx uintptr, msg string) (r lib.TJSValue) {
+	return throwError(tls, ctx, lib.XJS_ThrowTypeError, m.toJS(msg))
 }
 
-func throwInternalError(tls *libc.TLS, ctx uintptr, msg string) (r lib.TJSValue) {
-	p, err := libc.CString(validUTF8(msg))
+func (m *VM) throwInternalError(tls *libc.TLS, ctx uintptr, msg string) (r lib.TJSValue) {
+	return throwError(tls, ctx, lib.XJS_ThrowInternalError, m.toJS(msg))
+}
+
+// throwError throws the error of 'throw', lib.XJS_ThrowTypeError or the like,
+// with 'msg', which toJS returned or which is ASCII.
+func throwError(tls *libc.TLS, ctx uintptr, throw func(*libc.TLS, uintptr, uintptr, uintptr) lib.TJSValue, msg string) (r lib.TJSValue) {
+	p, err := libc.CString(msg)
 	if err != nil {
-		return lib.XJS_ThrowInternalError(tls, ctx, 0, 0)
+		return throw(tls, ctx, 0, 0)
 	}
 
 	defer libc.Xfree(tls, p)
@@ -1772,7 +1856,7 @@ func throwInternalError(tls *libc.TLS, ctx uintptr, msg string) (r lib.TJSValue)
 
 	defer tls.Free(16)
 
-	return lib.XJS_ThrowInternalError(tls, ctx, percentS, libc.VaList(bp+8, p))
+	return throw(tls, ctx, percentS, libc.VaList(bp+8, p))
 }
 
 type goFunc struct {
@@ -1870,7 +1954,7 @@ func (m *VM) registerFunc(name string, f any, wantThis, host bool) (err error) {
 		return fmt.Errorf("func name cannot be empty")
 	}
 
-	jsName := validUTF8(name)
+	jsName := m.toJS(name)
 	if strings.IndexByte(jsName, 0) >= 0 {
 		return fmt.Errorf("func name cannot contain a NUL byte: %q", name)
 	}
@@ -2041,7 +2125,8 @@ func callGo(tls *libc.TLS, ctx uintptr, this lib.TJSValue, argc int32, argv uint
 	goFuncsMu.Unlock()
 
 	if info == nil {
-		return throwInternalError(tls, ctx, fmt.Sprintf("callback id=%d not registered", magic))
+		// No VM to convert the message for, and it is ASCII.
+		return throwError(tls, ctx, lib.XJS_ThrowInternalError, fmt.Sprintf("callback id=%d not registered", magic))
 	}
 
 	m := info.vm
@@ -2081,11 +2166,11 @@ func (m *VM) callGoFunc(info *goFunc, this lib.TJSValue, argc int32, argv uintpt
 	ctx := m.cContext
 	haveArgs := int(argc)
 	if haveArgs < info.minArgs {
-		return throwTypeError(tls, ctx, fmt.Sprintf("not enough arguments in call to %s", info.name))
+		return m.throwTypeError(tls, ctx, fmt.Sprintf("not enough arguments in call to %s", info.name))
 	}
 
 	if info.maxArgs >= 0 && haveArgs > info.maxArgs {
-		return throwTypeError(tls, ctx, fmt.Sprintf("too many arguments in call to %s", info.name))
+		return m.throwTypeError(tls, ctx, fmt.Sprintf("too many arguments in call to %s", info.name))
 	}
 
 	var in []reflect.Value
@@ -2099,19 +2184,19 @@ func (m *VM) callGoFunc(info *goFunc, this lib.TJSValue, argc int32, argv uintpt
 		default:
 			v, err := m.value(this, false)
 			if err != nil {
-				return throwTypeError(tls, ctx, fmt.Sprintf("calling %s: argument conversion error: %v", info.name, err))
+				return m.throwTypeError(tls, ctx, fmt.Sprintf("calling %s: argument conversion error: %v", info.name, err))
 			}
 
 			rv := reflect.ValueOf(v)
 			switch {
 			case !rv.IsValid(): // Javascript null, m.value returns a nil any for it.
 				if !canBeNil(info.in[0]) {
-					return throwTypeError(tls, ctx, fmt.Sprintf("calling %s: cannot assign null to %s", info.name, info.in[0]))
+					return m.throwTypeError(tls, ctx, fmt.Sprintf("calling %s: cannot assign null to %s", info.name, info.in[0]))
 				}
 
 				rv = reflect.Zero(info.in[0])
 			case !rv.Type().AssignableTo(info.in[0]):
-				return throwTypeError(tls, ctx, fmt.Sprintf("calling %s: cannot assign %s to %s", info.name, rv.Type(), info.in[0]))
+				return m.throwTypeError(tls, ctx, fmt.Sprintf("calling %s: cannot assign %s to %s", info.name, rv.Type(), info.in[0]))
 			}
 
 			in = append(in, rv)
@@ -2135,19 +2220,19 @@ func (m *VM) callGoFunc(info *goFunc, this lib.TJSValue, argc int32, argv uintpt
 		default:
 			v, err := m.value(*(*lib.TJSValue)(unsafe.Pointer(argv)), false)
 			if err != nil {
-				return throwTypeError(tls, ctx, fmt.Sprintf("calling %s: argument conversion error: %v", info.name, err))
+				return m.throwTypeError(tls, ctx, fmt.Sprintf("calling %s: argument conversion error: %v", info.name, err))
 			}
 
 			rv := reflect.ValueOf(v)
 			switch {
 			case !rv.IsValid(): // Javascript null, m.value returns a nil any for it.
 				if !canBeNil(typ) {
-					return throwTypeError(tls, ctx, fmt.Sprintf("calling %s: cannot assign null to %s", info.name, typ))
+					return m.throwTypeError(tls, ctx, fmt.Sprintf("calling %s: cannot assign null to %s", info.name, typ))
 				}
 
 				rv = reflect.Zero(typ)
 			case !rv.Type().AssignableTo(typ):
-				return throwTypeError(tls, ctx, fmt.Sprintf("calling %s: cannot assign %s to %s", info.name, rv.Type(), typ))
+				return m.throwTypeError(tls, ctx, fmt.Sprintf("calling %s: cannot assign %s to %s", info.name, rv.Type(), typ))
 			}
 
 			in = append(in, rv)
@@ -2163,11 +2248,11 @@ func (m *VM) callGoFunc(info *goFunc, this lib.TJSValue, argc int32, argv uintpt
 	// error — rather than array-wrapping the (value, error) pair.
 	if info.hostFunc {
 		if e, _ := out[1].Interface().(error); e != nil {
-			return throwTypeError(tls, ctx, e.Error())
+			return m.throwTypeError(tls, ctx, e.Error())
 		}
 		r, err = m.jsValue(out[0])
 		if err != nil {
-			return throwTypeError(tls, ctx, fmt.Sprintf("callback %s: %v", info.name, err))
+			return m.throwTypeError(tls, ctx, fmt.Sprintf("callback %s: %v", info.name, err))
 		}
 		return r
 	}
@@ -2180,21 +2265,21 @@ func (m *VM) callGoFunc(info *goFunc, this lib.TJSValue, argc int32, argv uintpt
 		case isNative(info.out[0]):
 			x, ok := out[0].Interface().(Value)
 			if !ok {
-				return throwTypeError(tls, ctx, fmt.Sprintf("internal error: native Javascript value does not have type 'Value' (%v:)", origin(1)))
+				return m.throwTypeError(tls, ctx, fmt.Sprintf("internal error: native Javascript value does not have type 'Value' (%v:)", origin(1)))
 			}
 
 			r = x.v
 		default:
 			r, err = m.jsValue(out[0])
 			if err != nil {
-				return throwTypeError(tls, ctx, fmt.Sprintf("cannot convert value: %v", err))
+				return m.throwTypeError(tls, ctx, fmt.Sprintf("cannot convert value: %v", err))
 			}
 		}
 	default:
 		r, err = m.jsArray(out)
 	}
 	if err != nil {
-		return throwTypeError(tls, ctx, fmt.Sprintf("callback %s: %v", info.name, err))
+		return m.throwTypeError(tls, ctx, fmt.Sprintf("callback %s: %v", info.name, err))
 	}
 
 	return r
@@ -2353,7 +2438,7 @@ func (m *VM) jsMap(in reflect.Value) (out lib.TJSValue, err error) {
 			}
 		}
 
-		p, err2 := libc.CString(validUTF8(kv.key))
+		p, err2 := libc.CString(m.toJS(kv.key))
 		if err2 != nil {
 			lib.XFreeValue(tls, ctx, jv)
 			lib.XFreeValue(tls, ctx, obj)
@@ -2428,7 +2513,7 @@ func (m *VM) NewAtom(s string) (r Atom, err error) {
 	m.usable()
 	tls := m.runtime.tls
 	ctx := m.cContext
-	p, err := libc.CString(validUTF8(s))
+	p, err := libc.CString(m.toJS(s))
 	if err != nil {
 		return lib.MJS_ATOM_NULL, fmt.Errorf("OOM")
 	}
@@ -2907,8 +2992,8 @@ type moduleLoaderState struct {
 // jsMallocString allocates a C string using the QuickJS allocator so that QuickJS
 // can safely call js_free() on it. We use lib.Xjs_strdup to let the C side handle
 // the 32-bit/64-bit memory tracking alignment natively.
-func jsMallocString(tls *libc.TLS, ctx uintptr, s string) uintptr {
-	temp, err := libc.CString(validUTF8(s))
+func (m *VM) jsMallocString(tls *libc.TLS, ctx uintptr, s string) uintptr {
+	temp, err := libc.CString(m.toJS(s))
 	if err != nil {
 		return 0
 	}
@@ -2964,11 +3049,11 @@ func customModuleNormalize(tls *libc.TLS, ctx uintptr, module_base_name, module_
 
 	baseName := ""
 	if module_base_name != 0 {
-		baseName = cGoString(tls, module_base_name)
+		baseName = state.vm.cGoString(tls, module_base_name)
 	}
 	name := ""
 	if module_name != 0 {
-		name = cGoString(tls, module_name)
+		name = state.vm.cGoString(tls, module_name)
 	}
 
 	var normName string
@@ -2978,11 +3063,11 @@ func customModuleNormalize(tls *libc.TLS, ctx uintptr, module_base_name, module_
 	}
 
 	if err != nil {
-		throwTypeError(tls, ctx, fmt.Sprintf("module normalization failed: %v", err))
+		state.vm.throwTypeError(tls, ctx, fmt.Sprintf("module normalization failed: %v", err))
 		return 0
 	}
 
-	return jsMallocString(tls, ctx, normName)
+	return state.vm.jsMallocString(tls, ctx, normName)
 }
 
 func customModuleLoader(tls *libc.TLS, ctx uintptr, module_name uintptr, opaque uintptr, attrs lib.TJSValue) uintptr {
@@ -2996,7 +3081,7 @@ func customModuleLoader(tls *libc.TLS, ctx uintptr, module_name uintptr, opaque 
 
 	name := ""
 	if module_name != 0 {
-		name = cGoString(tls, module_name)
+		name = state.vm.cGoString(tls, module_name)
 	}
 
 	var source string
@@ -3006,13 +3091,13 @@ func customModuleLoader(tls *libc.TLS, ctx uintptr, module_name uintptr, opaque 
 	}
 
 	if err != nil {
-		throwTypeError(tls, ctx, fmt.Sprintf("module load failed: %v", err))
+		state.vm.throwTypeError(tls, ctx, fmt.Sprintf("module load failed: %v", err))
 		return 0
 	}
 
 	ps, err := libc.CString(source)
 	if err != nil {
-		throwInternalError(tls, ctx, "OOM")
+		state.vm.throwInternalError(tls, ctx, "OOM")
 		return 0
 	}
 	defer libc.Xfree(tls, ps)
