@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	golang.org/x/mod v0.42.0
 	modernc.org/fileutil v1.4.0
-	modernc.org/libc v1.79.0
+	modernc.org/libc v1.79.1
 	modernc.org/libquickjs v0.14.0
 )
 
