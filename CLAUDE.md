@@ -201,8 +201,27 @@ time; a Go function that took that error for its own then kept the outer script 
     a minute beside an hour grows a leading zero while a minute alone does not — do not "fix" a
     formatter against the prose without running this.
 - `compare/` — **separate module** (`modernc.org/quickjs/compare`, own `go.mod`) benchmarking this
-  engine against `github.com/dop251/goja` and `github.com/fastschema/qjs`, plus the arewefastyet V8
-  suite in `internal/arewefastyet/`. `make benchmark` runs here. It is its own module so that the
+  engine against `github.com/dop251/goja` and `github.com/fastschema/qjs` on two suites, printed by
+  `benchreport.go` as one table each. `make benchmark` runs here.
+  - `BenchmarkV8/<engine>/<benchmark>` — the V8 benchmark suite v7, the core of Octane and of what
+    zoo.js.org measures: whole programs, the headline table. The files stay in
+    `internal/arewefastyet/v8-v7` of the root module, where `memgrind_test.go` runs them as a leak
+    test; the benchmark reads them through `../`. It times `run()` b.N times in one engine kept
+    across the rounds of b.N (`Setup`, `TearDown` and the benchmarks before it in its suite run
+    untimed: Decrypt needs what Encrypt leaves behind). Time/op ratios are the inverse of V8 score
+    ratios. Never time the whole `BenchmarkSuite.RunSuites`: its harness runs every benchmark for a
+    fixed ~2 s, so the total says little about speed (the pre-Oct-2025 harness did exactly that).
+  - `BenchmarkCCGO`/`GOJA`/`QJS/<file>.js` — Bellard's micro benchmarks in `compare/testdata`, loops
+    over one operation each, written to tune QuickJS. Fine for finding a slow operation, not a
+    measure of how fast programs run.
+  - fastschema/qjs evaluates in strict mode only (the flag field is unexported): five micro
+    benchmarks are dropped for every engine because of it (`TestMain`, plus `date_parse.js` for a
+    goja gap), and QJS skips Crypto and EarleyBoyer of the V8 suite, so its V8 geomean is over six
+    suites.
+  - `benchreport.go` exits non-zero when any benchmark failed, which fails `make benchmark` and keeps
+    `generator.go` from recording a partial report.
+
+  It is its own module so that the
   benchmark-only deps (goja, qjs, wazero, regexp2, …) and its newer `go` directive stay out of the
   library's `go.mod`, where every consumer would see them. `compare/go.mod` carries
   `replace modernc.org/quickjs => ../`, so the benchmarks always build the working tree and
@@ -219,14 +238,16 @@ time; a Go function that took that error for its own then kept the outer script 
 - `testdata/benchmarks/<os>_<arch>.txt` — recorded benchmark output, one file per platform, first line
   `# root go.mod sha256 <hex>` recording what it was measured against.
 - `generator.go` (`//go:build ignore`, standalone `package main`, run via `//go:generate go run
-  generator.go`): runs `make benchmark` for the host platform and **rewrites the `# Performance` table
-  inside the `quickjs.go` package doc comment** from the geomean rows of every
-  `testdata/benchmarks/*.txt`. If you edit that table by hand it will be overwritten. The `CCGO:` label
+  generator.go`): runs `make benchmark` for the host platform and **rewrites the `# Performance` tables
+  inside the `quickjs.go` package doc comment** from the geomean rows (`v8-geomean`, `geomean`) of
+  every `testdata/benchmarks/*.txt`, `n/a` for a platform lacking one. If you edit those tables by hand
+  they will be overwritten. The `CCGO:` label
   is the `modernc.org/libquickjs` version from the root `go.mod` — the engine that was measured; the
   `GOJA:`/`QJS:` labels come from `compare/go.mod`, where they *are* resolved.
 
-  It benchmarks only when `testdata/benchmarks/<goos>_<goarch>.txt` is missing or its recorded
-  fingerprint differs from the current root `go.mod`, then re-renders the table unconditionally
+  It benchmarks only when `testdata/benchmarks/<goos>_<goarch>.txt` is missing, its recorded
+  fingerprint differs from the current root `go.mod` or it has no `v8-geomean` row (results from
+  before the V8 table), then re-renders the tables unconditionally
   (rendering is idempotent, so a builder with nothing to measure commits nothing). Keying on the root
   `go.mod` makes "the fleet regenerated" and "these numbers are stale" the same event: the builder's
   own autogen gate compares that same file against `internal/autogen/<goos>_<goarch>.mod`. Nothing has

@@ -21,31 +21,60 @@
 //
 // # Performance
 //
-// Geomeans of time/op over a set of benchmarks, relative to CCGO, lower number
-// is better. Detailed results available in the testdata/benchmarks directory.
+// Geomeans of time/op relative to CCGO, lower number is better, n/a where not
+// measured yet. Detailed results are in the testdata/benchmarks directory.
 //
-//	 CCGO: modernc.org/libquickjs@v0.14.0
-//	 GOJA: github.com/dop251/goja@v0.0.0-20261022125820-07c4b9d6265b
-//	  QJS: github.com/fastschema/qjs@v0.0.6
+//	CCGO: modernc.org/libquickjs@v0.14.0
+//	GOJA: github.com/dop251/goja@v0.0.0-20261022125820-07c4b9d6265b
+//	 QJS: github.com/fastschema/qjs@v0.0.6
 //
-//		                        CCGO     GOJA     QJS
-//		-----------------------------------------------
-//		        darwin/amd64    1.000    1.308    1.432
-//		        darwin/arm64    1.000    1.254    1.464
-//		       freebsd/amd64    1.000    1.383    1.522    (qemu)
-//		       freebsd/arm64    1.000    1.612    1.578    (qemu)
-//		           linux/386    1.000    2.404   94.825    (qemu)
-//		         linux/amd64    1.000    1.427    1.722
-//		           linux/arm    1.000    3.067  142.870
-//		         linux/arm64    1.000    1.750    1.875
-//		       linux/loong64    1.000    1.415   86.750
-//		       linux/ppc64le    1.000    2.052   82.620
-//		       linux/riscv64    1.000    1.173   67.233
-//		         linux/s390x    1.000    1.426   73.033    (qemu)
-//		       windows/amd64    1.000    1.796    1.682
-//		       windows/arm64    1.000    1.605    1.795
-//		-----------------------------------------------
-//		                        CCGO     GOJA     QJS
+// The V8 benchmark suite, version 7: Richards, DeltaBlue, Crypto, RayTrace,
+// EarleyBoyer, RegExp, Splay and NavierStokes. These are complete programs and
+// the better guide to how fast an application runs. QJS evaluates in strict
+// mode only, in which Crypto and EarleyBoyer do not load; its number is over
+// the other six.
+//
+//	                        CCGO     GOJA     QJS
+//	-----------------------------------------------
+//	        darwin/amd64      n/a      n/a      n/a
+//	        darwin/arm64      n/a      n/a      n/a
+//	       freebsd/amd64      n/a      n/a      n/a    (qemu)
+//	       freebsd/arm64      n/a      n/a      n/a    (qemu)
+//	           linux/386      n/a      n/a      n/a    (qemu)
+//	         linux/amd64      n/a      n/a      n/a
+//	           linux/arm      n/a      n/a      n/a
+//	         linux/arm64      n/a      n/a      n/a
+//	       linux/loong64      n/a      n/a      n/a
+//	       linux/ppc64le      n/a      n/a      n/a
+//	       linux/riscv64      n/a      n/a      n/a
+//	         linux/s390x      n/a      n/a      n/a    (qemu)
+//	       windows/amd64      n/a      n/a      n/a
+//	       windows/arm64      n/a      n/a      n/a
+//	-----------------------------------------------
+//	                        CCGO     GOJA     QJS
+//
+// The QuickJS micro benchmarks, loops that each repeat a single operation,
+// like a property read or a string append. They show which operations an
+// engine is fast or slow at, not how fast it runs a program.
+//
+//	                        CCGO     GOJA     QJS
+//	-----------------------------------------------
+//	        darwin/amd64    1.000    1.308    1.432
+//	        darwin/arm64    1.000    1.254    1.464
+//	       freebsd/amd64    1.000    1.383    1.522    (qemu)
+//	       freebsd/arm64    1.000    1.612    1.578    (qemu)
+//	           linux/386    1.000    2.404   94.825    (qemu)
+//	         linux/amd64    1.000    1.427    1.722
+//	           linux/arm    1.000    3.067  142.870
+//	         linux/arm64    1.000    1.750    1.875
+//	       linux/loong64    1.000    1.415   86.750
+//	       linux/ppc64le    1.000    2.052   82.620
+//	       linux/riscv64    1.000    1.173   67.233
+//	         linux/s390x    1.000    1.426   73.033    (qemu)
+//	       windows/amd64    1.000    1.796    1.682
+//	       windows/arm64    1.000    1.605    1.795
+//	-----------------------------------------------
+//	                        CCGO     GOJA     QJS
 //
 // # Notes
 //

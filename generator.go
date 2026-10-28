@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path"
@@ -34,6 +35,11 @@ const (
 	// regenerates: its autogen gate compares the same go.mod against
 	// internal/autogen/<goos>_<goarch>.mod. Nothing needs bumping by hand.
 	fingerprintPrefix = "# root go.mod sha256 "
+
+	// The labels of the geomean rows compare/benchreport.go prints, one per
+	// table: the V8 benchmark suite and the micro benchmarks.
+	geomeanV8    = "v8-geomean"
+	geomeanMicro = "geomean"
 )
 
 var (
@@ -96,13 +102,14 @@ func fingerprint() (string, error) {
 }
 
 // measured reports whether fn holds results recorded for fingerprint fp. A
-// missing file, or one predating fingerprintPrefix, is not measured.
+// missing file, one predating fingerprintPrefix or one predating the V8 table
+// is not measured.
 func measured(fn, fp string) (bool, error) {
 	b, err := os.ReadFile(fn)
 	switch {
 	case err == nil:
 		line, _, _ := bytes.Cut(b, []byte("\n"))
-		return string(line) == fp, nil
+		return string(line) == fp && geomeans(b)[geomeanV8] != nil, nil
 	case os.IsNotExist(err):
 		return false, nil
 	default:
@@ -130,6 +137,18 @@ func benchmark(fn, fp string) error {
 	// Only on success: a partial file carrying the current fingerprint would
 	// pass for measured and suppress the retry the next cycle owes us.
 	return os.WriteFile(fn, append([]byte(fp+"\n"), stdout.Bytes()...), 0660)
+}
+
+// geomeans returns the geomean rows of the results in b, keyed by their label,
+// the values in the order CCGO, GOJA, QJS.
+func geomeans(b []byte) map[string][]string {
+	r := map[string][]string{}
+	for _, v := range strings.Split(string(b), "\n") {
+		if f := strings.Fields(v); len(f) >= 4 && (f[0] == geomeanV8 || f[0] == geomeanMicro) { // geomean 1.000 1.019 0.848
+			r[f[0]] = f[1:4]
+		}
+	}
+	return r
 }
 
 // requires returns the versions of the modules required by the go.mod at fn,
@@ -176,9 +195,9 @@ func document() error {
 	for i, v := range m {
 		m[i] = filepath.ToSlash(v)
 	}
-	var results [][]string
+	var results []platformResults
 	for _, fn := range m {
-		result, err := os.ReadFile(fn)
+		b, err := os.ReadFile(fn)
 		if err != nil {
 			return err
 		}
@@ -186,26 +205,10 @@ func document() error {
 		key := path.Base(fn)                    // os_arch.txt
 		key = key[:len(key)-len(".txt")]        // os_arch
 		key = strings.Replace(key, "_", "/", 1) // os/arch
-		a := strings.Split(string(result), "\n")
-		for _, v := range a {
-			if f := strings.Fields(v); len(f) >= 4 && f[0] == "geomean" { // geomean 1.000 1.019 0.848
-				f[0] = key
-				results = append(results, f)
-				continue
-			}
-		}
+		results = append(results, platformResults{key, geomeans(b)})
 	}
 
-	slices.SortFunc(results, func(a, b []string) int {
-		switch {
-		case a[0] < b[0]:
-			return -1
-		case a[0] == b[0]:
-			return 0
-		default:
-			return 1
-		}
-	})
+	slices.SortFunc(results, func(a, b platformResults) int { return strings.Compare(a.key, b.key) })
 	doc, err := os.ReadFile(docFn)
 	if err != nil {
 		return err
@@ -226,26 +229,32 @@ func document() error {
 			}
 		case 1:
 			fmt.Fprintf(buf, `//
-// Geomeans of time/op over a set of benchmarks, relative to CCGO, lower number
-// is better. Detailed results available in the testdata/benchmarks directory.
+// Geomeans of time/op relative to CCGO, lower number is better, n/a where not
+// measured yet. Detailed results are in the testdata/benchmarks directory.
 //
 //  CCGO: %s
 //  GOJA: %s
 //   QJS: %s
 //
-//	                        CCGO     GOJA     QJS
-//	-----------------------------------------------
+// The V8 benchmark suite, version 7: Richards, DeltaBlue, Crypto, RayTrace,
+// EarleyBoyer, RegExp, Splay and NavierStokes. These are complete programs and
+// the better guide to how fast an application runs. QJS evaluates in strict
+// mode only, in which Crypto and EarleyBoyer do not load; its number is over
+// the other six.
+//
 `,
 				ver("modernc.org/libquickjs", root),
 				ver("github.com/dop251/goja", compare),
 				ver("github.com/fastschema/qjs", compare),
 			)
-			for _, v := range results {
-				fmt.Fprintf(buf, "//	%20s%9s%9s%9s%s\n", v[0], v[1], v[2], v[3], notes[v[0]])
-			}
-			fmt.Fprintf(buf, `//	-----------------------------------------------
-//	                        CCGO     GOJA     QJS
+			table(buf, results, geomeanV8)
+			fmt.Fprintf(buf, `//
+// The QuickJS micro benchmarks, loops that each repeat a single operation,
+// like a property read or a string append. They show which operations an
+// engine is fast or slow at, not how fast it runs a program.
+//
 `)
+			table(buf, results, geomeanMicro)
 			state++
 		case 2:
 			switch {
@@ -267,6 +276,30 @@ func document() error {
 	}
 
 	return nil
+}
+
+// platformResults are the geomean rows of one results file.
+type platformResults struct {
+	key      string              // os/arch
+	geomeans map[string][]string // by label: CCGO, GOJA, QJS
+}
+
+// table writes the rows labeled label of results to w, n/a for a platform
+// without one.
+func table(w io.Writer, results []platformResults, label string) {
+	fmt.Fprintf(w, `//	                        CCGO     GOJA     QJS
+//	-----------------------------------------------
+`)
+	for _, v := range results {
+		g := v.geomeans[label]
+		if g == nil {
+			g = []string{"n/a", "n/a", "n/a"}
+		}
+		fmt.Fprintf(w, "//	%20s%9s%9s%9s%s\n", v.key, g[0], g[1], g[2], notes[v.key])
+	}
+	fmt.Fprintf(w, `//	-----------------------------------------------
+//	                        CCGO     GOJA     QJS
+`)
 }
 
 // origin returns caller's short position, skipping skip frames.
