@@ -138,6 +138,7 @@ import (
 	"unsafe"
 
 	"modernc.org/libc"
+	"modernc.org/libc/stdio"
 	lib "modernc.org/libquickjs"
 )
 
@@ -1847,10 +1848,18 @@ func (m *VM) repanic() {
 }
 
 // StdAddHelpers adds the 'print' and 'console' global objects to 'm'.
+//
+// They write to the C stdout of the process, which this makes line buffered,
+// so that every line goes out when printed, like the output of os.Stdout.
 func (m *VM) StdAddHelpers() error {
 	m.usable()
 	tls := m.runtime.tls
 	ctx := m.cContext
+	// On Linux libc is musl, which fully buffers a stdout that is not a
+	// terminal, and print, unlike console.log, does not flush. C flushes in
+	// exit(), a Go program never calls that, and what print wrote after the
+	// first write was lost.
+	libc.Xsetvbuf(tls, libc.Xstdout, 0, stdio.X_IOLBF, 0)
 	lib.Xjs_std_add_helpers(tls, ctx, -1, 0)
 	return nil
 }
