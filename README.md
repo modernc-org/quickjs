@@ -1,7 +1,23 @@
+### Pure-Go JavaScript engine, no cgo
+
+The repository you are currently viewing might be a mirror. Please review the guidelines below based on where you are viewing this:
+
+| Platform | Role | Contributing Guidelines |
+| :--- | :--- | :--- |
+| **GitLab** | **Primary Source** | This is the canonical repository (`cznic/quickjs`). Main development happens here. |
+| **GitHub** | **Mirror** | This is a mirror (`modernc-org/quickjs`). We **do accept** Issues and Pull Requests here for your convenience! <br> *Note: PRs submitted here will be manually merged into the GitLab source, so please allow extra time for processing.* |
+
 [![Go Reference](https://pkg.go.dev/badge/modernc.org/quickjs.svg)](https://pkg.go.dev/modernc.org/quickjs)
 [![LiberaPay](https://liberapay.com/assets/widgets/donate.svg)](https://liberapay.com/jnml/donate)
 [![receives](https://img.shields.io/liberapay/receives/jnml.svg?logo=liberapay)](https://liberapay.com/jnml/donate)
 [![patrons](https://img.shields.io/liberapay/patrons/jnml.svg?logo=liberapay)](https://liberapay.com/jnml/donate)
+
+---
+
+![heart](sponsors/heart.png "heart")
+[Github Sponsors Account](https://github.com/sponsors/j-modernc-org) /  j-modernc-org
+
+---
 
 ![logo_png](logo.png)
 
