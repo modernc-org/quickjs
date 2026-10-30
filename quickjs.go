@@ -43,7 +43,7 @@
 //	           linux/386    1.000    2.476  100.095    (qemu)
 //	         linux/amd64      n/a      n/a      n/a
 //	           linux/arm      n/a      n/a      n/a
-//	         linux/arm64      n/a      n/a      n/a
+//	         linux/arm64    1.000    1.635    1.766
 //	       linux/loong64      n/a      n/a      n/a
 //	       linux/ppc64le      n/a      n/a      n/a
 //	       linux/riscv64      n/a      n/a      n/a
@@ -66,7 +66,7 @@
 //	           linux/386    1.000    2.368   95.598    (qemu)
 //	         linux/amd64    1.000    1.427    1.722
 //	           linux/arm    1.000    3.067  142.870
-//	         linux/arm64    1.000    1.750    1.875
+//	         linux/arm64    1.000    1.869    1.891
 //	       linux/loong64    1.000    1.415   86.750
 //	       linux/ppc64le    1.000    2.052   82.620
 //	       linux/riscv64    1.000    1.173   67.233
