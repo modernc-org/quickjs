@@ -49,7 +49,7 @@
 //	       linux/riscv64      n/a      n/a      n/a
 //	         linux/s390x      n/a      n/a      n/a    (qemu)
 //	       windows/amd64    1.000    1.595    1.601
-//	       windows/arm64      n/a      n/a      n/a
+//	       windows/arm64    1.000    1.692    1.884
 //	-----------------------------------------------
 //	                        CCGO     GOJA     QJS
 //
@@ -72,7 +72,7 @@
 //	       linux/riscv64    1.000    1.173   67.233
 //	         linux/s390x    1.000    1.426   73.033    (qemu)
 //	       windows/amd64    1.000    1.441    1.655
-//	       windows/arm64    1.000    1.605    1.795
+//	       windows/arm64    1.000    1.727    1.889
 //	-----------------------------------------------
 //	                        CCGO     GOJA     QJS
 //
