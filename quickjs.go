@@ -41,7 +41,7 @@
 //	       freebsd/amd64    1.000    1.527    1.524    (qemu)
 //	       freebsd/arm64    1.000    1.555    1.504    (qemu)
 //	           linux/386    1.000    2.476  100.095    (qemu)
-//	         linux/amd64    1.000    0.789    0.779
+//	         linux/amd64    1.000    0.856    0.811
 //	           linux/arm    1.000    2.801  138.201
 //	         linux/arm64    1.000    1.635    1.766
 //	       linux/loong64      n/a      n/a      n/a
@@ -64,7 +64,7 @@
 //	       freebsd/amd64    1.000    1.404    1.527    (qemu)
 //	       freebsd/arm64    1.000    1.627    1.582    (qemu)
 //	           linux/386    1.000    2.368   95.598    (qemu)
-//	         linux/amd64    1.000    1.367    1.603
+//	         linux/amd64    1.000    1.431    1.708
 //	           linux/arm    1.000    3.057  142.894
 //	         linux/arm64    1.000    1.869    1.891
 //	       linux/loong64    1.000    1.415   86.750
