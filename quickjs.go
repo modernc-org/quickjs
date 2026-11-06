@@ -48,7 +48,7 @@
 //	       linux/ppc64le    1.000    2.269   87.150
 //	       linux/riscv64      n/a      n/a      n/a
 //	         linux/s390x      n/a      n/a      n/a    (qemu)
-//	       windows/amd64    1.000    1.743    1.558
+//	       windows/amd64    1.000    1.656    1.649
 //	       windows/arm64    1.000    1.692    1.884
 //	-----------------------------------------------
 //	                        CCGO     GOJA     QJS
@@ -71,7 +71,7 @@
 //	       linux/ppc64le    1.000    2.004   82.203
 //	       linux/riscv64    1.000    1.173   67.233
 //	         linux/s390x    1.000    1.426   73.033    (qemu)
-//	       windows/amd64    1.000    1.648    1.562
+//	       windows/amd64    1.000    1.466    1.630
 //	       windows/arm64    1.000    1.727    1.889
 //	-----------------------------------------------
 //	                        CCGO     GOJA     QJS
