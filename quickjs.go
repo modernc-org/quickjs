@@ -44,7 +44,7 @@
 //	         linux/amd64    1.000    0.856    0.811
 //	           linux/arm    1.000    2.854  143.250
 //	         linux/arm64    1.000    1.660    1.784
-//	       linux/loong64      n/a      n/a      n/a
+//	       linux/loong64    1.000    1.490   90.096
 //	       linux/ppc64le    1.000    2.380   86.642
 //	       linux/riscv64    1.000    1.616   80.408
 //	         linux/s390x    1.000    1.662   71.321    (qemu)
@@ -67,7 +67,7 @@
 //	         linux/amd64    1.000    1.431    1.708
 //	           linux/arm    1.000    3.080  144.548
 //	         linux/arm64    1.000    1.776    1.875
-//	       linux/loong64    1.000    1.415   86.750
+//	       linux/loong64    1.000    1.335   86.013
 //	       linux/ppc64le    1.000    1.980   80.720
 //	       linux/riscv64    1.000    1.295   69.838
 //	         linux/s390x    1.000    1.456   67.623    (qemu)
