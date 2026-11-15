@@ -39,7 +39,7 @@
 //	        darwin/amd64    1.000    1.256    1.227
 //	        darwin/arm64    1.000    1.420    1.532
 //	       freebsd/amd64    1.000    1.678    1.709    (qemu)
-//	       freebsd/arm64    1.000    1.888    1.780    (qemu)
+//	       freebsd/arm64    1.000    1.980    1.777    (qemu)
 //	           linux/386    1.000    2.620  106.305    (qemu)
 //	         linux/amd64    1.000    0.866    0.858
 //	           linux/arm    1.000    3.281  171.490
@@ -62,7 +62,7 @@
 //	        darwin/amd64    1.000    1.331    1.456
 //	        darwin/arm64    1.000    1.305    1.530
 //	       freebsd/amd64    1.000    1.604    1.653    (qemu)
-//	       freebsd/arm64    1.000    1.850    1.759    (qemu)
+//	       freebsd/arm64    1.000    1.768    1.742    (qemu)
 //	           linux/386    1.000    2.369   94.400    (qemu)
 //	         linux/amd64    1.000    1.191    1.269
 //	           linux/arm    1.000    3.286  152.841
